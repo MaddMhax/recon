@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const VulnItem = require('../models/VulnItem');
 const User = require('../models/User');
+const { getSsoConfig } = require('../models/SsoConfig');
 const { isUuid } = require('../config/db');
 const { requireAuth } = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/admin');
@@ -226,6 +227,33 @@ router.delete('/users/:id', async (req, res) => {
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
   await user.destroy();
   res.json({ ok: true });
+});
+
+/* ------------------------------------------------------------------ */
+/* SSO configuration (OAuth2 / OIDC)                                   */
+/* ------------------------------------------------------------------ */
+
+// GET /api/admin/sso  — current config (client secret is never returned).
+router.get('/sso', async (_req, res) => {
+  const sso = await getSsoConfig();
+  res.json({ sso });
+});
+
+// PUT /api/admin/sso  — update the config. The client secret is only
+// overwritten when a non-empty value is supplied (so re-saving the form
+// without re-typing the secret keeps the existing one).
+router.put('/sso', async (req, res) => {
+  const cfg = await getSsoConfig();
+  const b = req.body || {};
+  const update = {};
+  const strFields = ['provider', 'label', 'clientId', 'authorizationUrl', 'tokenUrl', 'userinfoUrl', 'scopes', 'emailField', 'nameField'];
+  for (const k of strFields) if (b[k] !== undefined) update[k] = String(b[k]);
+  if (b.enabled !== undefined) update.enabled = !!b.enabled;
+  if (b.autoCreateUsers !== undefined) update.autoCreateUsers = !!b.autoCreateUsers;
+  if (b.defaultRole !== undefined) update.defaultRole = b.defaultRole === 'admin' ? 'admin' : 'auditor';
+  if (typeof b.clientSecret === 'string' && b.clientSecret.length) update.clientSecret = b.clientSecret;
+  await cfg.update(update);
+  res.json({ sso: cfg });
 });
 
 module.exports = router;

@@ -37,6 +37,7 @@ async function init() {
   renderVulns();
   renderImportExport();
   renderUsers();
+  renderSso();
 }
 
 document.getElementById('logoutBtn').addEventListener('click', async () => {
@@ -49,7 +50,7 @@ function setupTabs() {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tabs button').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      ['vulns', 'import', 'users'].forEach((t) =>
+      ['vulns', 'import', 'users', 'sso'].forEach((t) =>
         document.getElementById('tab-' + t).classList.toggle('hidden', t !== btn.dataset.tab));
     });
   });
@@ -499,6 +500,180 @@ function openResetLinkModal({ url, email, expiresAt }) {
     }
   });
   overlay.querySelector('#resetLinkClose').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+}
+
+// ====================================================================
+// SSO (OAuth2 / OIDC)
+// ====================================================================
+
+// Endpoint presets per provider. Selecting a provider fills these in; the
+// client id/secret are always entered by hand. Self-hosted GitLab/Keycloak:
+// edit the URLs after selecting the preset (replace the host / realm).
+const SSO_PRESETS = {
+  google: { label: 'Se connecter avec Google', authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth', tokenUrl: 'https://oauth2.googleapis.com/token', userinfoUrl: 'https://openidconnect.googleapis.com/v1/userinfo', scopes: 'openid email profile', emailField: 'email', nameField: 'name' },
+  github: { label: 'Se connecter avec GitHub', authorizationUrl: 'https://github.com/login/oauth/authorize', tokenUrl: 'https://github.com/login/oauth/access_token', userinfoUrl: 'https://api.github.com/user', scopes: 'read:user user:email', emailField: 'email', nameField: 'name' },
+  gitlab: { label: 'Se connecter avec GitLab', authorizationUrl: 'https://gitlab.com/oauth/authorize', tokenUrl: 'https://gitlab.com/oauth/token', userinfoUrl: 'https://gitlab.com/oauth/userinfo', scopes: 'openid email profile', emailField: 'email', nameField: 'name' },
+  keycloak: { label: 'Se connecter avec Keycloak', authorizationUrl: 'https://KEYCLOAK_HOST/realms/REALM/protocol/openid-connect/auth', tokenUrl: 'https://KEYCLOAK_HOST/realms/REALM/protocol/openid-connect/token', userinfoUrl: 'https://KEYCLOAK_HOST/realms/REALM/protocol/openid-connect/userinfo', scopes: 'openid email profile', emailField: 'email', nameField: 'name' },
+  microsoft: { label: 'Se connecter avec Microsoft', authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize', tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token', userinfoUrl: 'https://graph.microsoft.com/oidc/userinfo', scopes: 'openid email profile', emailField: 'email', nameField: 'name' },
+  custom: { label: 'Se connecter via SSO', authorizationUrl: '', tokenUrl: '', userinfoUrl: '', scopes: 'openid email profile', emailField: 'email', nameField: 'name' },
+};
+
+const PROVIDER_LABELS = { google: 'Google', github: 'GitHub', gitlab: 'GitLab', keycloak: 'Keycloak', microsoft: 'Microsoft', custom: 'Personnalisé (OAuth2 / OIDC)' };
+
+async function renderSso() {
+  const { sso } = await api.get('/api/admin/sso');
+  const el = document.getElementById('tab-sso');
+  const redirectUri = `${window.location.origin}/api/auth/sso/callback`;
+  const provOptions = Object.keys(PROVIDER_LABELS)
+    .map((k) => `<option value="${k}" ${sso.provider === k ? 'selected' : ''}>${esc(PROVIDER_LABELS[k])}</option>`)
+    .join('');
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <h2 style="margin:0">Authentification unique (SSO)</h2>
+        <button class="secondary small" id="ssoHelp" type="button">❔ Aide</button>
+      </div>
+      <p class="muted">Connexion via un fournisseur OAuth2 / OIDC. Renseignez l'application
+        créée chez le fournisseur, puis activez le SSO. Le bouton apparaîtra sur la page de connexion.</p>
+
+      <label class="chk" style="margin-top:6px">
+        <input type="checkbox" id="ssoEnabled" ${sso.enabled ? 'checked' : ''} />
+        <span>Activer le SSO</span>
+      </label>
+
+      <div class="grid cols-2" style="margin-top:10px">
+        <div><label>Fournisseur</label><select id="ssoProvider">${provOptions}</select></div>
+        <div><label>Texte du bouton</label><input id="ssoLabel" value="${esc(sso.label)}" /></div>
+      </div>
+
+      <label>URI de redirection (à enregistrer chez le fournisseur)</label>
+      <div class="row" style="gap:8px">
+        <input id="ssoRedirect" readonly value="${esc(redirectUri)}" />
+        <button class="secondary small" id="ssoCopyRedirect" type="button">Copier</button>
+      </div>
+
+      <div class="grid cols-2" style="margin-top:10px">
+        <div><label>Client ID</label><input id="ssoClientId" value="${esc(sso.clientId)}" /></div>
+        <div>
+          <label>Client Secret</label>
+          <input id="ssoClientSecret" type="password" placeholder="${sso.hasSecret ? '•••••••• (laisser vide pour conserver)' : ''}" />
+        </div>
+      </div>
+
+      <label>Authorization URL</label><input id="ssoAuthUrl" value="${esc(sso.authorizationUrl)}" />
+      <label>Token URL</label><input id="ssoTokenUrl" value="${esc(sso.tokenUrl)}" />
+      <label>Userinfo URL</label><input id="ssoUserinfoUrl" value="${esc(sso.userinfoUrl)}" />
+      <label>Scopes (séparés par des espaces)</label><input id="ssoScopes" value="${esc(sso.scopes)}" />
+
+      <div class="grid cols-2" style="margin-top:10px">
+        <div><label>Champ e-mail (userinfo)</label><input id="ssoEmailField" value="${esc(sso.emailField)}" /></div>
+        <div><label>Champ nom (userinfo)</label><input id="ssoNameField" value="${esc(sso.nameField)}" /></div>
+      </div>
+
+      <label class="chk" style="margin-top:12px">
+        <input type="checkbox" id="ssoAutoCreate" ${sso.autoCreateUsers ? 'checked' : ''} />
+        <span>Créer automatiquement les comptes à la première connexion</span>
+      </label>
+      <div style="margin-top:8px"><label>Rôle par défaut des comptes créés</label>
+        <select id="ssoDefaultRole" style="width:auto">
+          <option value="auditor" ${sso.defaultRole === 'auditor' ? 'selected' : ''}>Auditeur</option>
+          <option value="admin" ${sso.defaultRole === 'admin' ? 'selected' : ''}>Administrateur</option>
+        </select>
+      </div>
+
+      <div class="row" style="margin-top:14px"><button id="ssoSave">Enregistrer</button></div>
+      <div class="error" id="ssoError"></div>
+      <div class="muted" id="ssoOk"></div>
+    </div>
+  `;
+
+  // Provider preset: fill the endpoint fields (keep client id/secret untouched).
+  document.getElementById('ssoProvider').addEventListener('change', (e) => {
+    const p = SSO_PRESETS[e.target.value] || SSO_PRESETS.custom;
+    document.getElementById('ssoLabel').value = p.label;
+    document.getElementById('ssoAuthUrl').value = p.authorizationUrl;
+    document.getElementById('ssoTokenUrl').value = p.tokenUrl;
+    document.getElementById('ssoUserinfoUrl').value = p.userinfoUrl;
+    document.getElementById('ssoScopes').value = p.scopes;
+    document.getElementById('ssoEmailField').value = p.emailField;
+    document.getElementById('ssoNameField').value = p.nameField;
+  });
+
+  document.getElementById('ssoCopyRedirect').addEventListener('click', () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(redirectUri).then(() => toast('URI copiée')).catch(() => {});
+  });
+
+  document.getElementById('ssoHelp').addEventListener('click', () =>
+    openSsoHelpModal(document.getElementById('ssoProvider').value, redirectUri));
+
+  document.getElementById('ssoSave').addEventListener('click', async () => {
+    const errEl = document.getElementById('ssoError');
+    const okEl = document.getElementById('ssoOk');
+    errEl.textContent = '';
+    okEl.textContent = '';
+    try {
+      await api.request('PUT', '/api/admin/sso', {
+        enabled: document.getElementById('ssoEnabled').checked,
+        provider: document.getElementById('ssoProvider').value,
+        label: document.getElementById('ssoLabel').value,
+        clientId: document.getElementById('ssoClientId').value,
+        clientSecret: document.getElementById('ssoClientSecret').value, // blank → keep existing
+        authorizationUrl: document.getElementById('ssoAuthUrl').value,
+        tokenUrl: document.getElementById('ssoTokenUrl').value,
+        userinfoUrl: document.getElementById('ssoUserinfoUrl').value,
+        scopes: document.getElementById('ssoScopes').value,
+        emailField: document.getElementById('ssoEmailField').value,
+        nameField: document.getElementById('ssoNameField').value,
+        autoCreateUsers: document.getElementById('ssoAutoCreate').checked,
+        defaultRole: document.getElementById('ssoDefaultRole').value,
+      });
+      okEl.textContent = 'Configuration SSO enregistrée.';
+      renderSso();
+    } catch (err) {
+      errEl.textContent = err.message;
+    }
+  });
+}
+
+// Step-by-step help, tailored to the selected provider.
+function openSsoHelpModal(provider, redirectUri) {
+  const consoles = {
+    google: 'Google Cloud Console → APIs &amp; Services → Identifiants → « Créer des identifiants » → ID client OAuth → Application Web.',
+    github: 'GitHub → Settings → Developer settings → OAuth Apps → « New OAuth App ».',
+    gitlab: 'GitLab → User Settings (ou Group/Admin) → Applications → « Add new application ».',
+    keycloak: 'Keycloak Admin → votre Realm → Clients → « Create client » (type OpenID Connect, flux standard activé).',
+    microsoft: 'Azure Portal → Microsoft Entra ID → App registrations → « New registration ».',
+    custom: "La console d'administration de votre fournisseur OAuth2 / OIDC.",
+  };
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:640px; text-align:left">
+      <h2>Configurer le SSO — ${esc(PROVIDER_LABELS[provider] || 'OAuth2 / OIDC')}</h2>
+      <ol class="sso-help">
+        <li>Ouvrez ${consoles[provider] || consoles.custom}</li>
+        <li>Créez une application <strong>Web / confidentielle</strong> (avec secret).</li>
+        <li>Déclarez l'<strong>URI de redirection</strong> autorisée :
+          <code>${esc(redirectUri)}</code></li>
+        <li>Demandez les scopes <code>openid email profile</code> (ou équivalent) afin d'obtenir l'e-mail.</li>
+        <li>Copiez le <strong>Client ID</strong> et le <strong>Client Secret</strong> dans le formulaire.</li>
+        <li>Choisissez le fournisseur dans la liste : les URLs sont pré-remplies
+          (pour GitLab / Keycloak auto-hébergés, remplacez l'hôte et le realm).</li>
+        <li>Cochez « Activer le SSO » puis <strong>Enregistrez</strong>. Un bouton
+          apparaît sur la page de connexion.</li>
+        <li><em>Provisionnement</em> : sans création automatique, l'e-mail SSO doit
+          déjà exister dans « Utilisateurs ». Avec, un compte est créé au premier
+          login avec le rôle par défaut.</li>
+      </ol>
+      <div class="row" style="margin-top:14px; justify-content:flex-end">
+        <button id="ssoHelpClose" type="button">Fermer</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('#ssoHelpClose').addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 }
 

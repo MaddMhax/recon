@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { getSsoConfig } = require('../models/SsoConfig');
 const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
@@ -188,6 +189,113 @@ router.post('/reset', async (req, res) => {
   user.resetTokenExpires = null;
   await user.save();
   res.json({ ok: true });
+});
+
+/* ------------------------------------------------------------------ */
+/* SSO — generic OAuth2 / OIDC authorization-code flow (public)        */
+/* ------------------------------------------------------------------ */
+
+// The redirect URI the provider must be configured to call back. Honors the
+// reverse-proxy headers (app.set('trust proxy', 1)) so https is detected.
+const ssoRedirectUri = (req) => `${req.protocol}://${req.get('host')}/api/auth/sso/callback`;
+
+// Send the user back to the login screen with a readable error.
+const ssoFail = (res, msg) => res.redirect('/?sso_error=' + encodeURIComponent(msg));
+
+// GET /api/auth/sso/status  — what the login page needs to render the button.
+// Never exposes the client id/secret or endpoints.
+router.get('/sso/status', async (_req, res) => {
+  const cfg = await getSsoConfig();
+  res.json({ enabled: cfg.isUsable(), provider: cfg.provider, label: cfg.label });
+});
+
+// GET /api/auth/sso/login  — start the flow: redirect to the provider.
+router.get('/sso/login', async (req, res) => {
+  const cfg = await getSsoConfig();
+  if (!cfg.isUsable()) return ssoFail(res, 'SSO non configuré');
+
+  // State doubles as a CSRF token: a short-lived signed JWT, mirrored in an
+  // httpOnly cookie and checked on callback.
+  const state = jwt.sign({ n: crypto.randomBytes(16).toString('hex') }, process.env.JWT_SECRET, { expiresIn: '10m' });
+  res.cookie('sso_state', state, { httpOnly: true, sameSite: 'lax', secure: cookieSecure(), maxAge: 10 * 60 * 1000 });
+
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: cfg.clientId,
+    redirect_uri: ssoRedirectUri(req),
+    scope: cfg.scopes || 'openid email profile',
+    state,
+  });
+  res.redirect(`${cfg.authorizationUrl}?${params.toString()}`);
+});
+
+// GET /api/auth/sso/callback  — provider redirects here with ?code&state.
+router.get('/sso/callback', async (req, res) => {
+  const cfg = await getSsoConfig();
+  try {
+    if (!cfg.isUsable()) return ssoFail(res, 'SSO non configuré');
+
+    const { code, state } = req.query;
+    const cookieState = req.cookies && req.cookies.sso_state;
+    res.clearCookie('sso_state');
+    if (!code || !state || !cookieState || state !== cookieState) return ssoFail(res, 'État SSO invalide');
+    try { jwt.verify(String(state), process.env.JWT_SECRET); } catch (_) { return ssoFail(res, 'État SSO expiré'); }
+
+    // 1) Exchange the authorization code for an access token.
+    const tokenRes = await fetch(cfg.tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: String(code),
+        redirect_uri: ssoRedirectUri(req),
+        client_id: cfg.clientId,
+        client_secret: cfg.clientSecret || '',
+      }),
+    });
+    if (!tokenRes.ok) return ssoFail(res, "Échec de l'échange du code SSO");
+    const accessToken = (await tokenRes.json()).access_token;
+    if (!accessToken) return ssoFail(res, "Aucun jeton d'accès reçu");
+
+    // 2) Fetch the user profile.
+    const headers = { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'User-Agent': 'recon-sso' };
+    const uiRes = await fetch(cfg.userinfoUrl, { headers });
+    if (!uiRes.ok) return ssoFail(res, 'Échec de récupération du profil SSO');
+    const profile = await uiRes.json();
+
+    let email = profile[cfg.emailField || 'email'];
+    // GitHub does not return a private email on /user — fetch the primary one.
+    if (!email && cfg.provider === 'github') {
+      const emRes = await fetch('https://api.github.com/user/emails', { headers });
+      if (emRes.ok) {
+        const list = await emRes.json();
+        const pick = Array.isArray(list) && (list.find((e) => e.primary && e.verified) || list.find((e) => e.verified));
+        email = pick && pick.email;
+      }
+    }
+    if (!email) return ssoFail(res, 'Aucune adresse e-mail fournie par le fournisseur SSO');
+    email = String(email).toLowerCase().trim();
+
+    // 3) Resolve (or provision) the local account.
+    let user = await User.findOne({ where: { email } });
+    if (!user) {
+      if (!cfg.autoCreateUsers) {
+        return ssoFail(res, "Compte introuvable. Demandez à un administrateur de créer votre compte.");
+      }
+      const randomPw = crypto.randomBytes(24).toString('hex');
+      user = await User.create({
+        email,
+        passwordHash: await User.hashPassword(randomPw),
+        role: cfg.defaultRole === 'admin' ? 'admin' : 'auditor',
+      });
+    }
+
+    setAuthCookie(res, signToken(user));
+    return res.redirect('/');
+  } catch (err) {
+    console.error('[sso] callback error:', err);
+    return ssoFail(res, 'Erreur lors de la connexion SSO');
+  }
 });
 
 module.exports = router;

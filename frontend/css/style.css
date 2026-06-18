@@ -352,6 +352,22 @@ th { color: var(--muted); font-weight: 600; }
 /* Category section headers inside the admin referential table */
 tr.cat-header td { background: var(--panel-2); font-weight: 700; letter-spacing: .02em; }
 
+/* SSO login button + divider (login page) and help list (admin) */
+.sso-divider { display: flex; align-items: center; gap: 10px; margin: 18px 0 14px; color: var(--muted); font-size: .82rem; }
+.sso-divider::before, .sso-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.sso-btn {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; padding: 10px 14px; box-sizing: border-box;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font-weight: 600; text-decoration: none; cursor: pointer;
+}
+.sso-btn:hover { border-color: var(--accent); }
+.sso-btn svg { flex: 0 0 auto; display: block; }
+ol.sso-help { margin: 4px 0 0; padding-left: 22px; line-height: 1.55; }
+ol.sso-help li { margin-bottom: 8px; }
+ol.sso-help code { word-break: break-all; }
+
 /* Stats */
 .stats { display: flex; gap: 18px; flex-wrap: wrap; }
 .stat { background: var(--panel-2); border-radius: var(--radius); padding: 10px 16px; }

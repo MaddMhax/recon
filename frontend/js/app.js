@@ -26,6 +26,33 @@ async function init() {
 function showLogin() {
   document.getElementById('loginView').classList.remove('hidden');
   document.getElementById('appView').classList.add('hidden');
+  loadSsoButton();
+  showSsoError();
+}
+
+// Show a "Login with SSO" button (with the provider logo) when SSO is enabled.
+async function loadSsoButton() {
+  const area = document.getElementById('ssoArea');
+  if (!area) return;
+  try {
+    const s = await api.get('/api/auth/sso/status');
+    if (!s || !s.enabled) { area.classList.add('hidden'); area.innerHTML = ''; return; }
+    area.innerHTML = `
+      <div class="sso-divider"><span>ou</span></div>
+      <a class="sso-btn" href="/api/auth/sso/login">${ssoLogo(s.provider)}<span>${esc(s.label || 'Se connecter via SSO')}</span></a>`;
+    area.classList.remove('hidden');
+  } catch (_) {
+    area.classList.add('hidden');
+  }
+}
+
+// Surface an SSO error handed back as ?sso_error=... on the login screen.
+function showSsoError() {
+  const err = new URLSearchParams(window.location.search).get('sso_error');
+  if (!err) return;
+  const el = document.getElementById('loginError');
+  if (el) el.textContent = err;
+  window.history.replaceState({}, '', window.location.pathname); // clean the URL
 }
 
 function showApp() {
