@@ -29,6 +29,9 @@ async function connectDB() {
       // sync() (create-if-not-exists, no destructive alters) keeps deployment
       // simple — there is no separate migration step to run.
       await sequelize.sync();
+      // Idempotent additive migrations for columns introduced after the initial
+      // release (sync() does not alter existing tables). Safe to run every boot.
+      await sequelize.query('ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "ssoProvider" VARCHAR');
       console.log('[db] connected to PostgreSQL');
       return;
     } catch (err) {

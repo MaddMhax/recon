@@ -287,6 +287,7 @@ router.get('/sso/callback', async (req, res) => {
         email,
         passwordHash: await User.hashPassword(randomPw),
         role: cfg.defaultRole === 'admin' ? 'admin' : 'auditor',
+        ssoProvider: cfg.provider, // marks the account as SSO-provisioned
       });
     }
 

@@ -21,6 +21,9 @@ class User extends Model {
       role: v.role,
       color: v.color,
       hasAvatar: !!v.avatarData,
+      // Identity provider the account was created from (e.g. 'google'),
+      // or null for a local (password) account.
+      ssoProvider: v.ssoProvider || null,
       createdAt: v.createdAt,
       updatedAt: v.updatedAt,
     };
@@ -57,6 +60,9 @@ User.init(
     // stored, with an expiry. The raw token lives only in the link.
     resetTokenHash: { type: DataTypes.STRING, allowNull: true, defaultValue: null },
     resetTokenExpires: { type: DataTypes.DATE, allowNull: true, defaultValue: null },
+    // Set to the SSO provider key when the account was provisioned via SSO;
+    // null for accounts created locally (with a password).
+    ssoProvider: { type: DataTypes.STRING, allowNull: true, defaultValue: null },
   },
   {
     sequelize,

@@ -367,6 +367,9 @@ tr.cat-header td { background: var(--panel-2); font-weight: 700; letter-spacing:
 ol.sso-help { margin: 4px 0 0; padding-left: 22px; line-height: 1.55; }
 ol.sso-help li { margin-bottom: 8px; }
 ol.sso-help code { word-break: break-all; }
+/* User account type tags (admin users table) */
+.badge.tag-sso { background: #16331f; color: var(--accent); }
+.badge.tag-local { background: #2a2f35; color: var(--muted); }
 
 /* Stats */
 .stats { display: flex; gap: 18px; flex-wrap: wrap; }

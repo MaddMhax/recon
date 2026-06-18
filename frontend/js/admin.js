@@ -392,7 +392,7 @@ async function renderUsers() {
     <h2>Utilisateurs (${users.length})</h2>
     <div class="panel" style="overflow-x:auto">
       <table>
-        <thead><tr><th>E-mail</th><th>Rôle</th><th>Créé le</th><th></th></tr></thead>
+        <thead><tr><th>E-mail</th><th>Type</th><th>Rôle</th><th>Créé le</th><th></th></tr></thead>
         <tbody id="userRows"></tbody>
       </table>
     </div>
@@ -404,6 +404,9 @@ async function renderUsers() {
     return `
     <tr data-id="${u._id}">
       <td>${esc(u.email)}${isSelf ? ' <span class="muted">(vous)</span>' : ''}</td>
+      <td>${u.ssoProvider
+        ? `<span class="badge tag-sso" title="Compte provisionné via SSO (${esc(u.ssoProvider)})">SSO</span>`
+        : '<span class="badge tag-local">Local</span>'}</td>
       <td>
         <select class="u-role" style="width:auto" ${isSelf ? 'disabled title="Vous ne pouvez pas changer votre propre rôle"' : ''}>
           <option value="auditor" ${u.role === 'auditor' ? 'selected' : ''}>Auditeur</option>
