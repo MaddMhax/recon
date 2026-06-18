@@ -3,7 +3,8 @@
 // ====================================================================
 
 let me = null;
-let vulnCatFilter = 'all'; // referential category filter ('all' or a category name)
+let vulnCatFilter = 'all'; // category filter within the active referential
+let currentReferentialId = null; // active referential in the admin vulns tab
 
 // Group a flat (order-sorted) vuln list into category sections, preserving the
 // referential order. Items without a category fall into a trailing "Autres".
@@ -60,7 +61,15 @@ function setupTabs() {
 // Référentiel des vulnérabilités (CRUD)
 // ====================================================================
 async function renderVulns() {
-  const { vulns } = await api.get('/api/admin/vulns');
+  const { referentials } = await api.get('/api/admin/referentials');
+  // Resolve the active referential (kept in a module var across re-renders).
+  if (!referentials.some((r) => r._id === currentReferentialId)) {
+    const def = referentials.find((r) => r.isDefault) || referentials[0];
+    currentReferentialId = def ? def._id : null;
+  }
+  const currentRef = referentials.find((r) => r._id === currentReferentialId) || null;
+
+  const { vulns } = await api.get('/api/admin/vulns?referentialId=' + encodeURIComponent(currentReferentialId || ''));
   const el = document.getElementById('tab-vulns');
 
   const groups = groupByCategory(vulns);
@@ -75,6 +84,23 @@ async function renderVulns() {
   if (vulnCatFilter !== 'all' && !groups.some((g) => g.category === vulnCatFilter)) vulnCatFilter = 'all';
 
   el.innerHTML = `
+    <div class="panel">
+      <div class="row" style="gap:10px; align-items:flex-end; flex-wrap:wrap">
+        <div>
+          <label style="margin:0">Référentiel actif</label>
+          <select id="refSelect" style="width:auto">
+            ${referentials.map((r) => `<option value="${r._id}" ${r._id === currentReferentialId ? 'selected' : ''}>${esc(r.name)}${r.isDefault ? ' (défaut)' : ''}</option>`).join('')}
+          </select>
+        </div>
+        <button class="secondary small" id="refNew" type="button">+ Référentiel</button>
+        <button class="secondary small" id="refRename" type="button">Renommer</button>
+        <button class="secondary small" id="refDefault" type="button" ${currentRef && currentRef.isDefault ? 'disabled' : ''}>Définir par défaut</button>
+        <button class="danger small" id="refDelete" type="button" ${referentials.length <= 1 ? 'disabled' : ''}>Supprimer</button>
+      </div>
+      <p class="muted" style="margin:10px 0 0">Les vulnérabilités ci-dessous appartiennent au référentiel
+        <strong>${esc(currentRef ? currentRef.name : '—')}</strong>. Un projet copie le référentiel choisi à sa création.</p>
+    </div>
+
     <div class="panel">
       <h2>Ajouter une vulnérabilité</h2>
       <div class="grid cols-2">
@@ -94,7 +120,7 @@ async function renderVulns() {
       <div class="error" id="vError"></div>
     </div>
 
-    <h2>Référentiel (${vulns.length})</h2>
+    <h2>Vulnérabilités — ${esc(currentRef ? currentRef.name : '')} (${vulns.length})</h2>
     <div class="panel" style="overflow-x:auto">
       <div class="row" style="gap:8px; margin-bottom:12px; align-items:center">
         <label style="margin:0">Filtrer par catégorie</label>
@@ -185,6 +211,7 @@ async function renderVulns() {
     errEl.textContent = '';
     try {
       await api.post('/api/admin/vulns', {
+        referentialId: currentReferentialId,
         code: document.getElementById('vCode').value,
         category: document.getElementById('vCategory').value,
         name: document.getElementById('vName').value,
@@ -201,12 +228,47 @@ async function renderVulns() {
 
   const delAllBtn = document.getElementById('deleteAllBtn');
   if (delAllBtn && !delAllBtn.disabled) {
-    delAllBtn.addEventListener('click', () => openDeleteAllModal(vulns.length));
+    delAllBtn.addEventListener('click', () => openDeleteAllModal(vulns.length, currentReferentialId));
   }
+
+  // --- Referential management ---
+  document.getElementById('refSelect').addEventListener('change', (e) => {
+    currentReferentialId = e.target.value; vulnCatFilter = 'all'; renderVulns();
+  });
+  document.getElementById('refNew').addEventListener('click', async () => {
+    const name = prompt('Nom du nouveau référentiel :');
+    if (!name || !name.trim()) return;
+    try {
+      const { referential } = await api.post('/api/admin/referentials', { name: name.trim() });
+      currentReferentialId = referential._id; vulnCatFilter = 'all'; renderVulns();
+    } catch (err) { alert(err.message); }
+  });
+  document.getElementById('refRename').addEventListener('click', async () => {
+    if (!currentRef) return;
+    const name = prompt('Nouveau nom du référentiel :', currentRef.name);
+    if (!name || !name.trim() || name.trim() === currentRef.name) return;
+    try { await api.patch(`/api/admin/referentials/${currentRef._id}`, { name: name.trim() }); renderVulns(); }
+    catch (err) { alert(err.message); }
+  });
+  const refDefault = document.getElementById('refDefault');
+  if (refDefault && !refDefault.disabled) refDefault.addEventListener('click', async () => {
+    try { await api.patch(`/api/admin/referentials/${currentRef._id}`, { isDefault: true }); renderVulns(); }
+    catch (err) { alert(err.message); }
+  });
+  const refDelete = document.getElementById('refDelete');
+  if (refDelete && !refDelete.disabled) refDelete.addEventListener('click', async () => {
+    if (!confirm(`Supprimer le référentiel « ${currentRef.name} » et toutes ses vulnérabilités ?`)) return;
+    try {
+      await api.del(`/api/admin/referentials/${currentRef._id}`);
+      currentReferentialId = null; vulnCatFilter = 'all'; renderVulns();
+    } catch (err) { alert(err.message); }
+  });
 }
 
 // Destructive confirmation: reminds to export, requires typing "supprimer".
-function openDeleteAllModal(count) {
+// Scoped to one referential.
+function openDeleteAllModal(count, referentialId) {
+  const refQuery = '?referentialId=' + encodeURIComponent(referentialId || '');
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
@@ -231,7 +293,7 @@ function openDeleteAllModal(count) {
 
   input.addEventListener('input', () => { confirmBtn.disabled = !matches(); });
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && matches()) confirmBtn.click(); });
-  overlay.querySelector('#modalExport').addEventListener('click', () => { window.location.href = '/api/admin/vulns/export'; });
+  overlay.querySelector('#modalExport').addEventListener('click', () => { window.location.href = '/api/admin/vulns/export' + refQuery; });
   overlay.querySelector('#modalCancel').addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
   document.addEventListener('keydown', function esc(e) {
@@ -240,7 +302,7 @@ function openDeleteAllModal(count) {
   confirmBtn.addEventListener('click', async () => {
     if (!matches()) return;
     try {
-      const r = await api.del('/api/admin/vulns');
+      const r = await api.del('/api/admin/vulns' + refQuery);
       close();
       toast(`${r.deleted} vulnérabilité(s) supprimée(s)`);
       renderVulns();
@@ -292,12 +354,22 @@ function openEditRow(tr, v) {
 // ====================================================================
 // Import / Export JSON
 // ====================================================================
-function renderImportExport() {
+async function renderImportExport() {
   const el = document.getElementById('tab-import');
+  const { referentials } = await api.get('/api/admin/referentials');
+  const refOptions = referentials
+    .map((r) => `<option value="${r._id}" ${r.isDefault ? 'selected' : ''}>${esc(r.name)}</option>`)
+    .join('');
   el.innerHTML = `
     <div class="panel">
+      <label>Référentiel ciblé (export / import)</label>
+      <select id="ieReferential" style="width:auto">${refOptions}</select>
+      <p class="muted" style="margin:8px 0 0">L'export et l'import portent sur le référentiel sélectionné ci-dessus.</p>
+    </div>
+
+    <div class="panel">
       <h2>Exporter le référentiel</h2>
-      <p class="muted">Téléchargez l'ensemble du référentiel au format JSON
+      <p class="muted">Téléchargez le référentiel sélectionné au format JSON
         (sauvegarde / transfert). Chaque vulnérabilité embarque :
         <code>code</code>, <code>category</code>, <code>name</code>,
         <code>description</code>, <code>reference</code>, <code>command</code>,
@@ -328,7 +400,8 @@ function renderImportExport() {
 
   document.getElementById('exportBtn').addEventListener('click', () => {
     // hits the export endpoint which sets a download disposition
-    window.location.href = '/api/admin/vulns/export';
+    const rid = document.getElementById('ieReferential').value;
+    window.location.href = '/api/admin/vulns/export?referentialId=' + encodeURIComponent(rid);
   });
 
   const fileInput = document.getElementById('importFile');
@@ -357,6 +430,7 @@ function renderImportExport() {
       const r = await api.post('/api/admin/vulns/import', {
         vulns,
         mode: document.getElementById('importMode').value,
+        referentialId: document.getElementById('ieReferential').value,
       });
       resEl.textContent =
         `Import terminé (${r.mode}) : ${r.created} créée(s), ${r.updated} mise(s) à jour, ${r.errors.length} erreur(s).`;

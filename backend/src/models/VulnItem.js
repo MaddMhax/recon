@@ -9,6 +9,7 @@ class VulnItem extends Model {
     const v = this.get({ plain: true });
     return {
       _id: v.id,
+      referentialId: v.referentialId,
       code: v.code,
       category: v.category,
       name: v.name,
@@ -30,6 +31,10 @@ VulnItem.init(
       defaultValue: DataTypes.UUIDV4,
       primaryKey: true,
     },
+    // Owning referential (Web / Mobile / Interne / ...). Plain UUID column (no
+    // FK constraint) to keep table-creation order-independent; the app always
+    // sets it and cascades deletes itself.
+    referentialId: { type: DataTypes.UUID, allowNull: true },
     code: { type: DataTypes.STRING, allowNull: false, defaultValue: '' }, // optional, e.g. WSTG-ATHN-01
     category: { type: DataTypes.STRING, allowNull: false, defaultValue: '' },
     name: { type: DataTypes.STRING, allowNull: false },

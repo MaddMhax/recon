@@ -11,6 +11,7 @@ const authRoutes = require('./routes/auth');
 const projectRoutes = require('./routes/projects');
 const adminRoutes = require('./routes/admin');
 const userRoutes = require('./routes/users');
+const referentialRoutes = require('./routes/referentials');
 
 const app = express();
 
@@ -50,6 +51,7 @@ app.use((_req, res, next) => {
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/referentials', referentialRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/admin', adminRoutes);
 

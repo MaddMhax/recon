@@ -114,6 +114,8 @@ async function renderProjectList() {
   presenceUsers = [];
   if (socket) socket.emit('leave');
   const { projects } = await api.get('/api/projects');
+  let referentials = [];
+  try { referentials = (await api.get('/api/referentials')).referentials || []; } catch (_) { /* ignore */ }
   main().innerHTML = `
     <div class="row">
       <h1>Projets d'audit</h1>
@@ -125,6 +127,10 @@ async function renderProjectList() {
       <h2>Nouveau projet</h2>
       <label>Nom du projet *</label>
       <input id="npName" placeholder="Audit application X" />
+      <label>Référentiel</label>
+      <select id="npReferential" style="width:auto">
+        ${referentials.map((r) => `<option value="${r._id}" ${r.isDefault ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}
+      </select>
       <label>Périmètre (cibles, URLs, IPs)</label>
       <textarea id="npScope" placeholder="https://app.exemple.com&#10;192.168.1.0/24"></textarea>
       <label>Notes</label>
@@ -153,7 +159,7 @@ async function renderProjectList() {
               ${esc(PROJECT_STATUS_LABELS[p.status] || p.status)}
             </span>
           </div>
-          <div class="meta">${p.progress.done}/${p.progress.total} vérifiés · ${p.progress.findings} vulnérabilité(s)</div>
+          <div class="meta">${p.referential ? esc(p.referential) + ' · ' : ''}${p.progress.done}/${p.progress.total} vérifiés · ${p.progress.findings} vulnérabilité(s)</div>
           <div class="progress-bar"><span style="width:${pct}%"></span></div>
         </div>`;
     }).join('');
@@ -172,6 +178,7 @@ async function renderProjectList() {
     try {
       await api.post('/api/projects', {
         name: document.getElementById('npName').value,
+        referentialId: document.getElementById('npReferential').value,
         scope: document.getElementById('npScope').value,
         notes: document.getElementById('npNotes').value,
       });
@@ -188,7 +195,7 @@ async function renderProjectList() {
 async function renderProjectDetail(id) {
   currentProjectId = id;
   if (socket) socket.emit('join', id);
-  const { project } = await api.get(`/api/projects/${id}`);
+  const { project, referentialName } = await api.get(`/api/projects/${id}`);
   currentProject = project;
 
   main().innerHTML = `
@@ -202,7 +209,7 @@ async function renderProjectDetail(id) {
       <button class="secondary small" id="resyncBtn">Synchroniser le référentiel</button>
       <button class="danger small" id="deleteProjectBtn">Supprimer</button>
     </div>
-    <p class="subtitle">${esc(PROJECT_STATUS_LABELS[project.status] || project.status)}</p>
+    <p class="subtitle">${esc(PROJECT_STATUS_LABELS[project.status] || project.status)}${referentialName ? ' · Référentiel : ' + esc(referentialName) : ''}</p>
 
     <div class="presence" id="presenceBar"></div>
 

@@ -19,6 +19,7 @@ class Project extends Model {
       status: v.status,
       notes: v.notes,
       owner: v.ownerId,
+      referentialId: v.referentialId,
       checklist: v.checklist || [],
       createdAt: v.createdAt,
       updatedAt: v.updatedAt,
@@ -46,6 +47,9 @@ Project.init(
     // Owner user id. Kept as a plain UUID column (no FK constraint) to keep
     // table creation order-independent and deployment simple.
     ownerId: { type: DataTypes.UUID, allowNull: false },
+    // Source referential the checklist was snapshotted from (used by resync).
+    // Nullable so projects created before referentials existed still load.
+    referentialId: { type: DataTypes.UUID, allowNull: true },
     checklist: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
   },
   {

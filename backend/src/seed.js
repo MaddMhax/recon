@@ -1,10 +1,14 @@
 const User = require('./models/User');
 const VulnItem = require('./models/VulnItem');
+const Referential = require('./models/Referential');
+const { sequelize } = require('./config/db');
 const { getChecklistTemplate } = require('./data/wstgTemplate');
 
 // Idempotent bootstrap run at startup:
 //  - creates the admin account if it does not exist
-//  - populates the vulnerability catalog from the WSTG template if empty
+//  - creates the default referentials (Web / Mobile / Interne) if none exist
+//  - backfills any pre-referential vulns into the default ("Web") referential
+//  - populates the "Web" referential from the WSTG template if it is empty
 async function runSeed() {
   const adminEmail = (process.env.ADMIN_EMAIL || 'admin@local').toLowerCase().trim();
   const adminPassword = process.env.ADMIN_PASSWORD || 'admin1234';
@@ -19,10 +23,32 @@ async function runSeed() {
     console.log(`[seed] admin account created: ${adminEmail}`);
   }
 
-  const count = await VulnItem.count();
-  if (count === 0) {
+  // Referentials — "Web" is the default and ships the WSTG catalog; "Mobile"
+  // and "Interne" start empty for admins to populate.
+  if ((await Referential.count()) === 0) {
+    await Referential.bulkCreate([
+      { name: 'Web', isDefault: true, order: 0 },
+      { name: 'Mobile', isDefault: false, order: 1 },
+      { name: 'Interne', isDefault: false, order: 2 },
+    ]);
+    console.log('[seed] referentials created: Web (default), Mobile, Interne');
+  }
+
+  const web = (await Referential.findOne({ where: { name: 'Web' } })) ||
+    (await Referential.findOne({ where: { isDefault: true } }));
+
+  // Backfill: attach any vuln created before referentials existed to "Web".
+  if (web) {
+    await sequelize.query('UPDATE "vuln_items" SET "referentialId" = :id WHERE "referentialId" IS NULL', {
+      replacements: { id: web.id },
+    });
+  }
+
+  // Seed the WSTG catalog into "Web" only if that referential is still empty.
+  if (web && (await VulnItem.count({ where: { referentialId: web.id } })) === 0) {
     const template = getChecklistTemplate();
     const docs = template.map((t, i) => ({
+      referentialId: web.id,
       code: t.code,
       category: t.category,
       name: t.name,
@@ -33,7 +59,7 @@ async function runSeed() {
       order: i,
     }));
     await VulnItem.bulkCreate(docs);
-    console.log(`[seed] vulnerability catalog seeded with ${docs.length} items`);
+    console.log(`[seed] "Web" referential seeded with ${docs.length} items`);
   }
 }
 

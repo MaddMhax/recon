@@ -2,6 +2,8 @@ const express = require('express');
 const crypto = require('crypto');
 const VulnItem = require('../models/VulnItem');
 const User = require('../models/User');
+const Referential = require('../models/Referential');
+const { getDefaultReferential } = require('../models/Referential');
 const { getSsoConfig } = require('../models/SsoConfig');
 const { isUuid } = require('../config/db');
 const { requireAuth } = require('../middleware/auth');
@@ -15,23 +17,35 @@ const RESET_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
 const CATALOG_ORDER = [['order', 'ASC'], ['code', 'ASC']];
 
+// All vuln operations are scoped to a referential. Resolve it from the request
+// (query for GETs/deletes, body for writes), falling back to the default one.
+async function resolveReferentialId(req) {
+  const id = req.query.referentialId || (req.body && req.body.referentialId);
+  if (id && isUuid(id) && (await Referential.findByPk(id))) return id;
+  const def = await getDefaultReferential();
+  return def ? def.id : null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Vulnerability catalog (référentiel)                                 */
 /* ------------------------------------------------------------------ */
 
-// GET /api/admin/vulns
-router.get('/vulns', async (_req, res) => {
-  const vulns = await VulnItem.findAll({ order: CATALOG_ORDER });
+// GET /api/admin/vulns?referentialId=...
+router.get('/vulns', async (req, res) => {
+  const referentialId = await resolveReferentialId(req);
+  const vulns = await VulnItem.findAll({ where: { referentialId }, order: CATALOG_ORDER });
   res.json({ vulns });
 });
 
-// POST /api/admin/vulns
+// POST /api/admin/vulns  (referentialId in body)
 router.post('/vulns', async (req, res) => {
   const { code, category, name } = req.body || {};
   if (!name || !name.trim()) {
     return res.status(400).json({ error: "L'intitulé est requis" });
   }
+  const referentialId = await resolveReferentialId(req);
   const vuln = await VulnItem.create({
+    referentialId,
     code: (code || '').trim(),
     category: (category || '').trim(),
     name: name.trim(),
@@ -70,10 +84,11 @@ router.patch('/vulns/:id', async (req, res) => {
   res.json({ vuln });
 });
 
-// DELETE /api/admin/vulns  — wipe the entire catalog (UI requires the admin to
-// type "supprimer" to confirm; export reminder shown beforehand).
-router.delete('/vulns', async (_req, res) => {
-  const deleted = await VulnItem.destroy({ where: {} });
+// DELETE /api/admin/vulns?referentialId=...  — wipe one referential's catalog
+// (UI requires the admin to type "supprimer" to confirm; export reminder shown).
+router.delete('/vulns', async (req, res) => {
+  const referentialId = await resolveReferentialId(req);
+  const deleted = await VulnItem.destroy({ where: { referentialId } });
   res.json({ deleted });
 });
 
@@ -85,9 +100,10 @@ router.delete('/vulns/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /api/admin/vulns/export  — download the whole catalog as JSON
-router.get('/vulns/export', async (_req, res) => {
-  const rows = await VulnItem.findAll({ order: CATALOG_ORDER });
+// GET /api/admin/vulns/export?referentialId=...  — download one referential as JSON
+router.get('/vulns/export', async (req, res) => {
+  const referentialId = await resolveReferentialId(req);
+  const rows = await VulnItem.findAll({ where: { referentialId }, order: CATALOG_ORDER });
   const vulns = rows.map((v) => ({
     code: v.code,
     category: v.category,
@@ -111,9 +127,10 @@ router.post('/vulns/import', async (req, res) => {
   if (!Array.isArray(list)) {
     return res.status(400).json({ error: 'Format invalide : un tableau "vulns" est attendu' });
   }
+  const referentialId = await resolveReferentialId(req);
 
   if (mode === 'replace') {
-    await VulnItem.destroy({ where: {} });
+    await VulnItem.destroy({ where: { referentialId } });
   }
 
   let created = 0;
@@ -137,22 +154,81 @@ router.post('/vulns/import', async (req, res) => {
       order: Number(raw.order) || 0,
     };
     if (code) {
-      // Merge by code when one is provided.
-      const existing = await VulnItem.findOne({ where: { code } });
+      // Merge by code within this referential.
+      const existing = await VulnItem.findOne({ where: { referentialId, code } });
       if (existing) {
         await existing.update(doc);
         updated += 1;
       } else {
-        await VulnItem.create({ ...doc, code });
+        await VulnItem.create({ ...doc, code, referentialId });
         created += 1;
       }
     } else {
       // No code: always insert a new entry.
-      await VulnItem.create({ ...doc, code: '' });
+      await VulnItem.create({ ...doc, code: '', referentialId });
       created += 1;
     }
   }
   res.json({ mode, created, updated, errors });
+});
+
+/* ------------------------------------------------------------------ */
+/* Referentials (Web / Mobile / Interne / ...)                         */
+/* ------------------------------------------------------------------ */
+
+// GET /api/admin/referentials
+router.get('/referentials', async (_req, res) => {
+  const referentials = await Referential.findAll({ order: [['order', 'ASC'], ['name', 'ASC']] });
+  res.json({ referentials });
+});
+
+// POST /api/admin/referentials  { name }
+router.post('/referentials', async (req, res) => {
+  const name = String((req.body && req.body.name) || '').trim();
+  if (!name) return res.status(400).json({ error: 'Le nom du référentiel est requis' });
+  if (await Referential.findOne({ where: { name } })) {
+    return res.status(409).json({ error: 'Un référentiel porte déjà ce nom' });
+  }
+  const max = await Referential.max('order');
+  const referential = await Referential.create({ name, order: (Number.isFinite(max) ? max : -1) + 1 });
+  res.status(201).json({ referential });
+});
+
+// PATCH /api/admin/referentials/:id  { name?, isDefault? }
+router.patch('/referentials/:id', async (req, res) => {
+  const ref = isUuid(req.params.id) ? await Referential.findByPk(req.params.id) : null;
+  if (!ref) return res.status(404).json({ error: 'Référentiel introuvable' });
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name) return res.status(400).json({ error: 'Le nom du référentiel est requis' });
+    const clash = await Referential.findOne({ where: { name } });
+    if (clash && clash.id !== ref.id) return res.status(409).json({ error: 'Un référentiel porte déjà ce nom' });
+    ref.name = name;
+  }
+  if (req.body.isDefault === true && !ref.isDefault) {
+    await Referential.update({ isDefault: false }, { where: {} });
+    ref.isDefault = true;
+  }
+  await ref.save();
+  res.json({ referential: ref });
+});
+
+// DELETE /api/admin/referentials/:id  — also removes its vulnerabilities.
+router.delete('/referentials/:id', async (req, res) => {
+  const ref = isUuid(req.params.id) ? await Referential.findByPk(req.params.id) : null;
+  if (!ref) return res.status(404).json({ error: 'Référentiel introuvable' });
+  if ((await Referential.count()) <= 1) {
+    return res.status(400).json({ error: 'Impossible de supprimer le dernier référentiel' });
+  }
+  await VulnItem.destroy({ where: { referentialId: ref.id } });
+  const wasDefault = ref.isDefault;
+  await ref.destroy();
+  // Keep exactly one default referential.
+  if (wasDefault) {
+    const next = await Referential.findOne({ order: [['order', 'ASC'], ['name', 'ASC']] });
+    if (next) { next.isDefault = true; await next.save(); }
+  }
+  res.json({ ok: true });
 });
 
 /* ------------------------------------------------------------------ */

@@ -2,6 +2,8 @@ const express = require('express');
 const crypto = require('crypto');
 const Project = require('../models/Project');
 const VulnItem = require('../models/VulnItem');
+const Referential = require('../models/Referential');
+const { getDefaultReferential } = require('../models/Referential');
 const { isUuid } = require('../config/db');
 const { requireAuth } = require('../middleware/auth');
 const { broadcast } = require('../realtime');
@@ -9,10 +11,19 @@ const { broadcast } = require('../realtime');
 const router = express.Router();
 router.use(requireAuth);
 
-// Build a fresh checklist snapshot from the master catalog. Each embedded item
-// gets its own stable id (`_id`) so the frontend can address it individually.
-async function buildChecklistFromCatalog() {
-  const items = await VulnItem.findAll({ order: [['order', 'ASC'], ['code', 'ASC']] });
+// { referentialId: name } map, for labelling projects in responses.
+async function referentialNameMap() {
+  const refs = await Referential.findAll();
+  return Object.fromEntries(refs.map((r) => [r.id, r.name]));
+}
+
+// Build a fresh checklist snapshot from one referential's catalog. Each embedded
+// item gets its own stable id (`_id`) so the frontend can address it.
+async function buildChecklistFromCatalog(referentialId) {
+  const items = await VulnItem.findAll({
+    where: { referentialId },
+    order: [['order', 'ASC'], ['code', 'ASC']],
+  });
   return items.map((v) => ({
     _id: crypto.randomUUID(),
     code: v.code,
@@ -30,6 +41,7 @@ async function buildChecklistFromCatalog() {
 // GET /api/projects  — list (lightweight, with progress)
 router.get('/', async (_req, res) => {
   const projects = await Project.findAll({ order: [['updatedAt', 'DESC']] });
+  const names = await referentialNameMap();
   const summary = projects.map((p) => {
     const checklist = p.checklist || [];
     const total = checklist.length;
@@ -39,6 +51,7 @@ router.get('/', async (_req, res) => {
       _id: p.id,
       name: p.name,
       status: p.status,
+      referential: names[p.referentialId] || null,
       updatedAt: p.updatedAt,
       progress: { total, done, findings },
     };
@@ -52,13 +65,20 @@ router.post('/', async (req, res) => {
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Le nom du projet est requis' });
   }
-  const checklist = await buildChecklistFromCatalog();
+  // Resolve the chosen referential, falling back to the default one.
+  let referentialId = req.body && req.body.referentialId;
+  if (!referentialId || !isUuid(referentialId) || !(await Referential.findByPk(referentialId))) {
+    const def = await getDefaultReferential();
+    referentialId = def ? def.id : null;
+  }
+  const checklist = referentialId ? await buildChecklistFromCatalog(referentialId) : [];
   const project = await Project.create({
     name: name.trim(),
     scope: scope || '',
     notes: notes || '',
     status: status || 'active',
     ownerId: req.user.id,
+    referentialId,
     checklist,
   });
   res.status(201).json({ project });
@@ -68,7 +88,8 @@ router.post('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   const project = isUuid(req.params.id) ? await Project.findByPk(req.params.id) : null;
   if (!project) return res.status(404).json({ error: 'Projet introuvable' });
-  res.json({ project });
+  const names = await referentialNameMap();
+  res.json({ project, referentialName: names[project.referentialId] || null });
 });
 
 // PATCH /api/projects/:id  — update project metadata
@@ -138,7 +159,14 @@ router.post('/:id/resync', async (req, res) => {
   const key = (c) => (c.code ? `code:${c.code}` : `name:${c.name}`);
   const checklist = (project.checklist || []).map((c) => ({ ...c }));
   const existing = new Set(checklist.map(key));
-  const catalog = await buildChecklistFromCatalog();
+  // Resync from the project's own referential (fall back to the default one for
+  // projects created before referentials existed).
+  let referentialId = project.referentialId;
+  if (!referentialId) {
+    const def = await getDefaultReferential();
+    referentialId = def ? def.id : null;
+  }
+  const catalog = referentialId ? await buildChecklistFromCatalog(referentialId) : [];
   const added = catalog.filter((c) => !existing.has(key(c)));
 
   project.checklist = checklist.concat(added);
