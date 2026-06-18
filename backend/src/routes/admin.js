@@ -332,4 +332,98 @@ router.put('/sso', async (req, res) => {
   res.json({ sso: cfg });
 });
 
+// Fetch a URL with a hard timeout; never throws — returns a normalized result.
+async function probe(url, init = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    // redirect: 'manual' so a 3xx is reported as-is (a discovery/auth URL that
+    // redirects is usually a misconfiguration, not a success).
+    const res = await fetch(url, { redirect: 'manual', signal: ctrl.signal, ...init });
+    return { status: res.status, res };
+  } catch (err) {
+    return { error: err.name === 'AbortError' ? 'délai dépassé' : (err.cause?.code || err.message) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// POST /api/admin/sso/test  — check that the configured endpoints are reachable
+// and (when possible) that the client id/secret are accepted by the token
+// endpoint. Tests the supplied form values, falling back to the stored secret
+// when the secret field is left blank (same rule as PUT).
+router.post('/sso/test', async (req, res) => {
+  const cfg = await getSsoConfig();
+  const b = req.body || {};
+  const pick = (k) => (typeof b[k] === 'string' && b[k].length ? b[k] : cfg[k]);
+  const authorizationUrl = pick('authorizationUrl');
+  const tokenUrl = pick('tokenUrl');
+  const userinfoUrl = pick('userinfoUrl');
+  const clientId = pick('clientId');
+  const clientSecret = typeof b.clientSecret === 'string' && b.clientSecret.length ? b.clientSecret : cfg.clientSecret;
+
+  const checks = [];
+
+  // 1) Authorization URL — probe with the real authorization-code parameters.
+  //    A bare GET just yields HTTP 400 ("missing client_id") even on a perfectly
+  //    valid endpoint, so send the same params the login flow uses: the provider
+  //    then renders its login page (200) or redirects to it (302) when the
+  //    client_id and redirect_uri are correct, and returns an error otherwise —
+  //    which also catches an unregistered redirect URI.
+  if (!authorizationUrl) {
+    checks.push({ name: "URL d'autorisation", ok: false, message: 'Non renseignée' });
+  } else if (!clientId) {
+    checks.push({ name: "URL d'autorisation", ok: false, message: 'Client ID non renseigné' });
+  } else {
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: `${req.protocol}://${req.get('host')}/api/auth/sso/callback`,
+      scope: pick('scopes') || 'openid email profile',
+      state: 'sso-test',
+    });
+    const r = await probe(`${authorizationUrl}?${params.toString()}`);
+    if (r.error) checks.push({ name: "URL d'autorisation", ok: false, message: `Injoignable (${r.error})` });
+    else if (r.status === 200 || r.status === 302) checks.push({ name: "URL d'autorisation", ok: true, message: `HTTP ${r.status} — page de connexion accessible` });
+    else checks.push({ name: "URL d'autorisation", ok: false, message: `HTTP ${r.status} — vérifiez le Client ID et l'URI de redirection` });
+  }
+
+  // 2) Token URL — validate the client credentials with a client_credentials grant.
+  //    invalid_client = bad id/secret; unauthorized_client/unsupported_grant_type
+  //    = credentials accepted but the grant is disabled (still proves the secret).
+  if (!tokenUrl) {
+    checks.push({ name: 'URL de jeton + identifiants client', ok: false, message: 'URL de jeton non renseignée' });
+  } else if (!clientId) {
+    checks.push({ name: 'URL de jeton + identifiants client', ok: false, message: 'Client ID non renseigné' });
+  } else {
+    const r = await probe(tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      body: new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret || '' }),
+    });
+    if (r.error) {
+      checks.push({ name: 'URL de jeton + identifiants client', ok: false, message: `Injoignable (${r.error})` });
+    } else {
+      let err = null;
+      try { err = (await r.res.json()).error; } catch (_) { /* non-JSON body */ }
+      if (r.status === 200) checks.push({ name: 'URL de jeton + identifiants client', ok: true, message: 'Identifiants acceptés (jeton obtenu)' });
+      else if (err === 'invalid_client' || r.status === 401) checks.push({ name: 'URL de jeton + identifiants client', ok: false, message: 'Identifiants client refusés (invalid_client) — vérifiez le Client Secret' });
+      else if (err === 'unauthorized_client' || err === 'unsupported_grant_type' || err === 'invalid_grant') checks.push({ name: 'URL de jeton + identifiants client', ok: true, message: `Identifiants acceptés (grant client_credentials désactivé : ${err})` });
+      else checks.push({ name: 'URL de jeton + identifiants client', ok: false, message: `HTTP ${r.status}${err ? ` (${err})` : ''}` });
+    }
+  }
+
+  // 3) Userinfo URL — should be reachable and require a token (401 is expected/healthy).
+  if (!userinfoUrl) {
+    checks.push({ name: 'URL userinfo', ok: false, message: 'Non renseignée' });
+  } else {
+    const r = await probe(userinfoUrl);
+    if (r.error) checks.push({ name: 'URL userinfo', ok: false, message: `Injoignable (${r.error})` });
+    else if (r.status === 401 || r.status === 403) checks.push({ name: 'URL userinfo', ok: true, message: `HTTP ${r.status} — joignable (jeton requis)` });
+    else checks.push({ name: 'URL userinfo', ok: r.status < 400, message: `HTTP ${r.status}` });
+  }
+
+  res.json({ checks, ok: checks.every((c) => c.ok) });
+});
+
 module.exports = router;

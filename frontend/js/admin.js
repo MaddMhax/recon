@@ -660,7 +660,11 @@ async function renderSso() {
         </select>
       </div>
 
-      <div class="row" style="margin-top:14px"><button id="ssoSave">Enregistrer</button></div>
+      <div class="row" style="margin-top:14px; gap:8px">
+        <button id="ssoSave">Enregistrer</button>
+        <button class="secondary" id="ssoTest" type="button">Tester les URL</button>
+      </div>
+      <div id="ssoTestResults" style="margin-top:10px"></div>
       <div class="error" id="ssoError"></div>
       <div class="muted" id="ssoOk"></div>
     </div>
@@ -710,6 +714,36 @@ async function renderSso() {
       renderSso();
     } catch (err) {
       errEl.textContent = err.message;
+    }
+  });
+
+  // Test the endpoints without saving. Sends the current form values; a blank
+  // secret falls back to the stored one (same rule as save).
+  document.getElementById('ssoTest').addEventListener('click', async () => {
+    const btn = document.getElementById('ssoTest');
+    const out = document.getElementById('ssoTestResults');
+    document.getElementById('ssoError').textContent = '';
+    document.getElementById('ssoOk').textContent = '';
+    btn.disabled = true;
+    out.innerHTML = '<span class="muted">Test en cours…</span>';
+    try {
+      const { checks } = await api.request('POST', '/api/admin/sso/test', {
+        clientId: document.getElementById('ssoClientId').value,
+        clientSecret: document.getElementById('ssoClientSecret').value,
+        authorizationUrl: document.getElementById('ssoAuthUrl').value,
+        tokenUrl: document.getElementById('ssoTokenUrl').value,
+        userinfoUrl: document.getElementById('ssoUserinfoUrl').value,
+      });
+      out.innerHTML = checks
+        .map((c) => `<div class="row" style="gap:8px; align-items:baseline">
+          <span>${c.ok ? '✅' : '❌'}</span>
+          <span><strong>${esc(c.name)}</strong> — ${esc(c.message)}</span>
+        </div>`)
+        .join('');
+    } catch (err) {
+      out.innerHTML = `<span class="error">${esc(err.message)}</span>`;
+    } finally {
+      btn.disabled = false;
     }
   });
 }
