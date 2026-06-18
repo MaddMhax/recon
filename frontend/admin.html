@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Recon — Administration</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand" title="Liste des projets">RECON<span>_</span></a>
+    <nav>
+      <a href="/">Projets</a>
+      <a href="/admin">Administration</a>
+      <button class="user-btn" id="profileBtn" type="button" title="Personnaliser">
+        <span class="user-chip" id="navAvatar"></span>
+        <span class="user" id="navUser"></span>
+        <span class="caret">▾</span>
+      </button>
+      <button class="theme-toggle secondary small" type="button" title="Thème clair / sombre">☀️</button>
+      <button class="secondary small" id="logoutBtn">Déconnexion</button>
+    </nav>
+  </header>
+
+  <main id="adminMain">
+    <h1>Administration</h1>
+    <p class="subtitle">Gérez le référentiel de vulnérabilités et les utilisateurs.</p>
+
+    <div class="tabs">
+      <button data-tab="vulns" class="active">Référentiel des vulnérabilités</button>
+      <button data-tab="import">Import / Export JSON</button>
+      <button data-tab="users">Utilisateurs</button>
+    </div>
+
+    <section id="tab-vulns"></section>
+    <section id="tab-import" class="hidden"></section>
+    <section id="tab-users" class="hidden"></section>
+  </main>
+
+  <script src="/js/api.js"></script>
+  <script src="/js/profile.js"></script>
+  <script src="/js/admin.js"></script>
+</body>
+</html>

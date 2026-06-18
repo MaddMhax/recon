@@ -1,0 +1,42 @@
+const { Sequelize } = require('sequelize');
+
+// Single shared Sequelize instance for the whole app. Connection string comes
+// from DATABASE_URL, e.g. postgres://user:pass@db:5432/recon
+const url = process.env.DATABASE_URL;
+if (!url) {
+  throw new Error('DATABASE_URL is not set');
+}
+
+const sequelize = new Sequelize(url, {
+  dialect: 'postgres',
+  logging: false, // set to console.log to debug SQL
+});
+
+// Guard against passing a non-UUID id to findByPk — Postgres would raise
+// "invalid input syntax for type uuid" (a 500). We want a clean 404 instead,
+// so callers can check this first and treat a bad id as "not found".
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v) => typeof v === 'string' && UUID_RE.test(v);
+
+async function connectDB() {
+  // Retry loop — the app container can start before Postgres is ready to accept
+  // connections even with depends_on/healthcheck in place.
+  const maxAttempts = 10;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await sequelize.authenticate();
+      // Create any missing tables. The schema is small and additive, so plain
+      // sync() (create-if-not-exists, no destructive alters) keeps deployment
+      // simple — there is no separate migration step to run.
+      await sequelize.sync();
+      console.log('[db] connected to PostgreSQL');
+      return;
+    } catch (err) {
+      console.warn(`[db] connection attempt ${attempt}/${maxAttempts} failed: ${err.message}`);
+      if (attempt === maxAttempts) throw err;
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+}
+
+module.exports = { sequelize, connectDB, isUuid };

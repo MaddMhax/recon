@@ -1,0 +1,60 @@
+services:
+  # Plain PostgreSQL — no AVX requirement, so it runs on any CPU (unlike
+  # MongoDB 5.0+, which crashes with SIGILL on hosts without AVX). Tables are
+  # created automatically by the app on first boot (Sequelize sync), so there
+  # is no migration step to run.
+  db:
+    image: postgres:16-alpine
+    container_name: pentest_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-recon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-recon}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - pentest_net
+    # No host port published by default — the DB is only reachable from the app
+    # container on the internal network. Uncomment to inspect from the host.
+    # ports:
+    #   - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recon} -d ${POSTGRES_DB:-recon}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: pentest_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      # Send the session cookie only over HTTPS. Keep "false" when serving over
+      # plain HTTP (e.g. http://localhost:3000) otherwise the browser drops the
+      # cookie and every page reload logs you out. Set to "true" once a TLS
+      # reverse proxy is in front of the app.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-recon}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-recon}
+      JWT_SECRET: ${JWT_SECRET:-please-change-this-secret}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin1234}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    networks:
+      - pentest_net
+
+volumes:
+  db_data:
+
+networks:
+  pentest_net:
+    driver: bridge
