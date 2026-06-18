@@ -3,6 +3,21 @@
 // ====================================================================
 
 let me = null;
+let vulnCatFilter = 'all'; // referential category filter ('all' or a category name)
+
+// Group a flat (order-sorted) vuln list into category sections, preserving the
+// referential order. Items without a category fall into a trailing "Autres".
+function groupByCategory(list) {
+  const groups = [];
+  const map = new Map();
+  for (const v of list) {
+    const cat = (v.category || '').trim() || 'Autres';
+    let g = map.get(cat);
+    if (!g) { g = { category: cat, items: [] }; map.set(cat, g); groups.push(g); }
+    g.items.push(v);
+  }
+  return groups;
+}
 
 async function init() {
   try {
@@ -47,6 +62,10 @@ async function renderVulns() {
   const { vulns } = await api.get('/api/admin/vulns');
   const el = document.getElementById('tab-vulns');
 
+  const groups = groupByCategory(vulns);
+  // Reset the filter if the selected category no longer exists.
+  if (vulnCatFilter !== 'all' && !groups.some((g) => g.category === vulnCatFilter)) vulnCatFilter = 'all';
+
   el.innerHTML = `
     <div class="panel">
       <h2>Ajouter une vulnérabilité</h2>
@@ -69,8 +88,15 @@ async function renderVulns() {
 
     <h2>Référentiel (${vulns.length})</h2>
     <div class="panel" style="overflow-x:auto">
+      <div class="row" style="gap:8px; margin-bottom:12px; align-items:center">
+        <label style="margin:0">Filtrer par catégorie</label>
+        <select id="catFilter" style="width:auto">
+          <option value="all">Toutes les catégories (${vulns.length})</option>
+          ${groups.map((g) => `<option value="${esc(g.category)}"${vulnCatFilter === g.category ? ' selected' : ''}>${esc(g.category)} (${g.items.length})</option>`).join('')}
+        </select>
+      </div>
       <table>
-        <thead><tr><th>Code</th><th>Catégorie</th><th>Intitulé</th><th>Cmd</th><th></th></tr></thead>
+        <thead><tr><th>Code</th><th>Intitulé</th><th>Cmd</th><th></th></tr></thead>
         <tbody id="vulnRows"></tbody>
       </table>
     </div>
@@ -83,31 +109,44 @@ async function renderVulns() {
   `;
 
   const rows = document.getElementById('vulnRows');
-  rows.innerHTML = vulns.map((v, i) => `
+  // Render one section per category (header row + its items). When a filter is
+  // active, only that category is shown. Up/down are bounded within a category.
+  const visibleGroups = vulnCatFilter === 'all' ? groups : groups.filter((g) => g.category === vulnCatFilter);
+  rows.innerHTML = visibleGroups.map((g) => {
+    const header = `<tr class="cat-header"><td colspan="4">${esc(g.category)} <span class="muted">(${g.items.length})</span></td></tr>`;
+    const items = g.items.map((v, i) => `
     <tr data-id="${v._id}">
       <td><span class="ci-code">${esc(v.code) || '—'}</span></td>
-      <td>${esc(v.category) || '<span class="muted">—</span>'}</td>
       <td>${esc(v.name)}</td>
       <td title="Commande renseignée">${v.command ? '✓' : '—'}</td>
       <td>
         <div class="row" style="gap:8px">
           <button class="secondary small btn-up" title="Monter" ${i === 0 ? 'disabled' : ''}>▲</button>
-          <button class="secondary small btn-down" title="Descendre" ${i === vulns.length - 1 ? 'disabled' : ''}>▼</button>
+          <button class="secondary small btn-down" title="Descendre" ${i === g.items.length - 1 ? 'disabled' : ''}>▼</button>
           <button class="secondary small btn-edit">Modifier</button>
           <button class="danger small btn-del">Suppr.</button>
         </div>
       </td>
     </tr>`).join('');
+    return header + items;
+  }).join('') || '<tr><td colspan="4" class="muted">Aucune vulnérabilité.</td></tr>';
 
-  // Move a row up (-1) or down (+1): swap in the local list, persist the new
+  // Move a vuln up (-1) or down (+1) within its category, persist the new global
   // order, then re-render. The order is reflected in new projects' checklists.
   const move = async (id, dir) => {
-    const i = vulns.findIndex((x) => x._id === id);
-    const j = i + dir;
-    if (i < 0 || j < 0 || j >= vulns.length) return;
-    [vulns[i], vulns[j]] = [vulns[j], vulns[i]];
+    for (const g of groups) {
+      const i = g.items.findIndex((x) => x._id === id);
+      if (i === -1) continue;
+      const j = i + dir;
+      if (j < 0 || j >= g.items.length) return;
+      [g.items[i], g.items[j]] = [g.items[j], g.items[i]];
+      break;
+    }
+    // Flatten all categories back to a single ordered id list (keeps categories
+    // grouped so the order stays stable across reloads and in project views).
+    const ids = groups.flatMap((g) => g.items.map((x) => x._id));
     try {
-      await api.post('/api/admin/vulns/reorder', { ids: vulns.map((x) => x._id) });
+      await api.post('/api/admin/vulns/reorder', { ids });
       renderVulns();
     } catch (err) {
       alert(err.message);
@@ -115,7 +154,7 @@ async function renderVulns() {
     }
   };
 
-  rows.querySelectorAll('tr').forEach((tr) => {
+  rows.querySelectorAll('tr[data-id]').forEach((tr) => {
     const id = tr.dataset.id;
     const v = vulns.find((x) => x._id === id);
     const up = tr.querySelector('.btn-up');
@@ -129,6 +168,9 @@ async function renderVulns() {
     });
     tr.querySelector('.btn-edit').addEventListener('click', () => openEditRow(tr, v));
   });
+
+  const catFilter = document.getElementById('catFilter');
+  if (catFilter) catFilter.addEventListener('change', () => { vulnCatFilter = catFilter.value; renderVulns(); });
 
   document.getElementById('vAdd').addEventListener('click', async () => {
     const errEl = document.getElementById('vError');
@@ -203,7 +245,7 @@ function openDeleteAllModal(count) {
 
 function openEditRow(tr, v) {
   tr.innerHTML = `
-    <td colspan="5">
+    <td colspan="4">
       <div class="grid cols-2">
         <div><label>Code</label><input class="e-code" value="${esc(v.code)}" /></div>
         <div><label>Catégorie</label><input class="e-cat" value="${esc(v.category)}" /></div>

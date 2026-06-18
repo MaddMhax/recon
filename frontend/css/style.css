@@ -349,6 +349,8 @@ input[type=color] { width: 48px; height: 32px; padding: 2px; cursor: pointer; }
 table { width: 100%; border-collapse: collapse; font-size: .88rem; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 th { color: var(--muted); font-weight: 600; }
+/* Category section headers inside the admin referential table */
+tr.cat-header td { background: var(--panel-2); font-weight: 700; letter-spacing: .02em; }
 
 /* Stats */
 .stats { display: flex; gap: 18px; flex-wrap: wrap; }
