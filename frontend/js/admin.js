@@ -748,35 +748,64 @@ async function renderSso() {
   });
 }
 
-// Step-by-step help, tailored to the selected provider.
-function openSsoHelpModal(provider, redirectUri) {
+// Generic step-by-step help for an OAuth2 / OIDC provider.
+function genericSsoHelpSteps(provider, redirectUri) {
   const consoles = {
     google: 'Google Cloud Console → APIs &amp; Services → Identifiants → « Créer des identifiants » → ID client OAuth → Application Web.',
     github: 'GitHub → Settings → Developer settings → OAuth Apps → « New OAuth App ».',
     gitlab: 'GitLab → User Settings (ou Group/Admin) → Applications → « Add new application ».',
-    keycloak: 'Keycloak Admin → votre Realm → Clients → « Create client » (type OpenID Connect, flux standard activé).',
     microsoft: 'Azure Portal → Microsoft Entra ID → App registrations → « New registration ».',
     custom: "La console d'administration de votre fournisseur OAuth2 / OIDC.",
   };
+  return [
+    `Ouvrez ${consoles[provider] || consoles.custom}`,
+    `Créez une application <strong>Web / confidentielle</strong> (avec secret).`,
+    `Déclarez l'<strong>URI de redirection</strong> autorisée : <code>${esc(redirectUri)}</code>`,
+    `Demandez les scopes <code>openid email profile</code> (ou équivalent) afin d'obtenir l'e-mail.`,
+    `Copiez le <strong>Client ID</strong> et le <strong>Client Secret</strong> dans le formulaire.`,
+    `Choisissez le fournisseur dans la liste : les URLs sont pré-remplies (pour GitLab / Keycloak auto-hébergés, remplacez l'hôte et le realm).`,
+    `Cochez « Activer le SSO » puis <strong>Enregistrez</strong>. Un bouton apparaît sur la page de connexion.`,
+    `<em>Provisionnement</em> : sans création automatique, l'e-mail SSO doit déjà exister dans « Utilisateurs ». Avec, un compte est créé au premier login avec le rôle par défaut.`,
+  ];
+}
+
+// Detailed walkthrough for a fresh Keycloak install, mirroring the gotchas that
+// actually bite: same-realm URLs, the Docker localhost trap, the client must be
+// confidential, and the user needs an e-mail. Service accounts are only needed
+// so the « Tester les URL » button (which uses a client_credentials grant) can
+// validate the secret — the login flow itself does not require them.
+function keycloakSsoHelpSteps(redirectUri) {
+  const r = esc(redirectUri);
+  return [
+    `<em>(Optionnel)</em> Démarrez Keycloak : <code>docker run -d --name keycloak -p 8080:8080 -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin quay.io/keycloak/keycloak:26 start-dev</code>`,
+    `Console Keycloak → sélecteur de realm (en haut à gauche) → « Create realm » (ex. <code>recon</code>).`,
+    `Clients → « Create client » → type <strong>OpenID Connect</strong>, puis un Client ID (ex. <code>recon</code>).`,
+    `<strong>Capability config</strong> : activez « Client authentication » (client confidentiel) et « Standard flow ». Pour que le bouton « Tester les URL » valide le secret, activez aussi « Service accounts roles » (le test utilise un grant <code>client_credentials</code>) — la connexion réelle n'en a pas besoin.`,
+    `<strong>Login settings</strong> : Valid redirect URIs = <code>${r}</code> · Web origins = l'origine de l'application.`,
+    `Onglet <strong>Credentials</strong> → copiez le <strong>Client secret</strong>.`,
+    `Les trois URLs doivent viser le <strong>même realm</strong> (remplacez l'hôte et <code>REALM</code>) :<br>
+      <code>…/realms/REALM/protocol/openid-connect/auth</code><br>
+      <code>…/realms/REALM/protocol/openid-connect/token</code><br>
+      <code>…/realms/REALM/protocol/openid-connect/userinfo</code><br>
+      (vérifiables via <code>…/realms/REALM/.well-known/openid-configuration</code>)`,
+    `<strong>Docker</strong> : si l'application tourne en conteneur, n'utilisez pas <code>localhost</code> pour les URLs Token/Userinfo (= le conteneur lui-même). Utilisez une IP/hôte joignable à la fois par le navigateur <em>et</em> par le backend.`,
+    `Realm → Users → « Add user » : renseignez un <strong>e-mail</strong> (obligatoire), puis définissez un mot de passe (onglet Credentials, « Temporary » désactivé).`,
+    `Collez Client ID + secret dans le formulaire, cochez « Activer le SSO », <strong>Enregistrez</strong>. Sans création automatique, l'e-mail doit déjà exister dans « Utilisateurs ».`,
+  ];
+}
+
+// Step-by-step help, tailored to the selected provider.
+function openSsoHelpModal(provider, redirectUri) {
+  const steps = provider === 'keycloak'
+    ? keycloakSsoHelpSteps(redirectUri)
+    : genericSsoHelpSteps(provider, redirectUri);
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal" style="max-width:640px; text-align:left">
       <h2>Configurer le SSO — ${esc(PROVIDER_LABELS[provider] || 'OAuth2 / OIDC')}</h2>
       <ol class="sso-help">
-        <li>Ouvrez ${consoles[provider] || consoles.custom}</li>
-        <li>Créez une application <strong>Web / confidentielle</strong> (avec secret).</li>
-        <li>Déclarez l'<strong>URI de redirection</strong> autorisée :
-          <code>${esc(redirectUri)}</code></li>
-        <li>Demandez les scopes <code>openid email profile</code> (ou équivalent) afin d'obtenir l'e-mail.</li>
-        <li>Copiez le <strong>Client ID</strong> et le <strong>Client Secret</strong> dans le formulaire.</li>
-        <li>Choisissez le fournisseur dans la liste : les URLs sont pré-remplies
-          (pour GitLab / Keycloak auto-hébergés, remplacez l'hôte et le realm).</li>
-        <li>Cochez « Activer le SSO » puis <strong>Enregistrez</strong>. Un bouton
-          apparaît sur la page de connexion.</li>
-        <li><em>Provisionnement</em> : sans création automatique, l'e-mail SSO doit
-          déjà exister dans « Utilisateurs ». Avec, un compte est créé au premier
-          login avec le rôle par défaut.</li>
+        ${steps.map((s) => `<li>${s}</li>`).join('')}
       </ol>
       <div class="row" style="margin-top:14px; justify-content:flex-end">
         <button id="ssoHelpClose" type="button">Fermer</button>
