@@ -338,9 +338,9 @@ function drawChecklist(projectId, project) {
 
   const vars = buildVarMap(project);
 
-  // Group by category, preserving the referential order (the checklist array is
-  // already in the admin-defined order). Categories appear in first-seen order;
-  // items without a category fall into a trailing "Autres" group.
+  // Group by category. The checklist array stays in the admin-defined order, so
+  // items keep that order within each group; the categories themselves are
+  // sorted alphabetically, with the catch-all "Autres" group last.
   const groups = [];
   const byCat = new Map();
   for (const it of items) {
@@ -349,6 +349,11 @@ function drawChecklist(projectId, project) {
     if (!g) { g = { category: cat, items: [] }; byCat.set(cat, g); groups.push(g); }
     g.items.push(it);
   }
+  groups.sort((a, b) => {
+    if (a.category === 'Autres') return 1;
+    if (b.category === 'Autres') return -1;
+    return a.category.localeCompare(b.category, 'fr', { sensitivity: 'base' });
+  });
 
   // Within each category, only checks marked "verified + not vulnerable" sink to
   // the bottom. Unverified, verified-but-undecided and vulnerable stay on top.

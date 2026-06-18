@@ -63,6 +63,13 @@ async function renderVulns() {
   const el = document.getElementById('tab-vulns');
 
   const groups = groupByCategory(vulns);
+  // Sort categories alphabetically (catch-all "Autres" last) so the admin list,
+  // the filter dropdown and the persisted order match the project view.
+  groups.sort((a, b) => {
+    if (a.category === 'Autres') return 1;
+    if (b.category === 'Autres') return -1;
+    return a.category.localeCompare(b.category, 'fr', { sensitivity: 'base' });
+  });
   // Reset the filter if the selected category no longer exists.
   if (vulnCatFilter !== 'all' && !groups.some((g) => g.category === vulnCatFilter)) vulnCatFilter = 'all';
 
