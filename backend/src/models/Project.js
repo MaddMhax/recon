@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { DataTypes, Model } = require('sequelize');
 const { sequelize } = require('../config/db');
 
@@ -14,6 +15,8 @@ class Project extends Model {
       _id: v.id,
       name: v.name,
       client: v.client,
+      // Random, unguessable token used to build shareable deep links (/p/<slug>).
+      shareSlug: v.shareSlug,
       scope: v.scope,
       variables: v.variables || [],
       status: v.status,
@@ -35,6 +38,9 @@ Project.init(
       primaryKey: true,
     },
     name: { type: DataTypes.STRING, allowNull: false },
+    // 16-char hex share token. Nullable so projects created before this column
+    // existed still load; backfilled at boot (see seed.js). Unique when present.
+    shareSlug: { type: DataTypes.STRING(16), allowNull: true, unique: true },
     client: { type: DataTypes.STRING, allowNull: false, defaultValue: '' },
     scope: { type: DataTypes.TEXT, allowNull: false, defaultValue: '' },
     variables: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
@@ -58,5 +64,8 @@ Project.init(
     tableName: 'projects',
   }
 );
+
+// 16 hex chars = 64 bits of entropy — unguessable enough for a share link.
+Project.genShareSlug = () => crypto.randomBytes(8).toString('hex');
 
 module.exports = Project;

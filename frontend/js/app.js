@@ -68,8 +68,37 @@ function showApp() {
     if (socket) socket.emit('profile', { color: user.color, hasAvatar: user.hasAvatar });
   });
   connectRealtime();
-  renderProjectList();
+  // Deep link? Open the shared project directly; otherwise show the project list.
+  const slug = shareSlugFromUrl();
+  if (slug) openProjectBySlug(slug);
+  else renderProjectList();
 }
+
+// Read a /p/<slug> share route from the address bar (null if not on one).
+function shareSlugFromUrl() {
+  const m = window.location.pathname.match(/^\/p\/([0-9a-f]{16})$/i);
+  return m ? m[1] : null;
+}
+
+// Resolve a share slug to its project and open it. Falls back to the list (with
+// a notice) if the slug is unknown — e.g. the project was deleted.
+async function openProjectBySlug(slug) {
+  try {
+    const data = await api.get('/api/projects/by-slug/' + encodeURIComponent(slug));
+    renderProjectDetail(data.project._id, { preloaded: data, push: false });
+  } catch (_) {
+    toast('Projet introuvable');
+    renderProjectList();
+  }
+}
+
+// Back/forward buttons: re-route from the URL without pushing a new entry.
+window.addEventListener('popstate', () => {
+  if (!currentUser) return;
+  const slug = shareSlugFromUrl();
+  if (slug) openProjectBySlug(slug);
+  else renderProjectList();
+});
 
 // ---- Connexion ----
 document.getElementById('loginForm').addEventListener('submit', async (e) => {
@@ -112,6 +141,8 @@ async function renderProjectList() {
   currentProjectId = null;
   currentProject = null;
   presenceUsers = [];
+  // Drop any /p/<slug> deep link from the address bar (no-op on a popstate to '/').
+  if (window.location.pathname !== '/') window.history.pushState({}, '', '/');
   if (socket) socket.emit('leave');
   const { projects } = await api.get('/api/projects');
   let referentials = [];
@@ -192,11 +223,19 @@ async function renderProjectList() {
 // ====================================================================
 // Détail d'un projet + checklist
 // ====================================================================
-async function renderProjectDetail(id) {
+async function renderProjectDetail(id, opts = {}) {
   currentProjectId = id;
   if (socket) socket.emit('join', id);
-  const { project, referentialName } = await api.get(`/api/projects/${id}`);
+  const { project, referentialName } = opts.preloaded || await api.get(`/api/projects/${id}`);
   currentProject = project;
+
+  // Reflect the shareable deep link in the address bar. A normal click pushes a
+  // new history entry; arriving via a link or the back button replaces in place.
+  if (project.shareSlug) {
+    const url = '/p/' + project.shareSlug;
+    if (opts.push === false) window.history.replaceState({}, '', url);
+    else window.history.pushState({}, '', url);
+  }
 
   main().innerHTML = `
     <div class="row">
@@ -205,6 +244,7 @@ async function renderProjectDetail(id) {
     <div class="row" style="margin-top:8px">
       <h1>${esc(project.name)}</h1>
       <div class="spacer"></div>
+      <button class="secondary small" id="shareProjectBtn">Partager</button>
       <button class="secondary small" id="editProjectBtn">Modifier</button>
       <button class="secondary small" id="resyncBtn">Synchroniser le référentiel</button>
       <button class="danger small" id="deleteProjectBtn">Supprimer</button>
@@ -252,6 +292,10 @@ async function renderProjectDetail(id) {
   renderPresence();
 
   document.getElementById('backLink').addEventListener('click', (e) => { e.preventDefault(); renderProjectList(); });
+  document.getElementById('shareProjectBtn').addEventListener('click', () => {
+    if (!currentProject.shareSlug) { toast('Lien de partage indisponible'); return; }
+    copyShareLink(window.location.origin + '/p/' + currentProject.shareSlug);
+  });
   document.getElementById('deleteProjectBtn').addEventListener('click', async () => {
     if (!confirm('Supprimer définitivement ce projet ?')) return;
     await api.del(`/api/projects/${id}`);
@@ -278,6 +322,29 @@ async function renderProjectDetail(id) {
   });
 
   drawChecklist(id, project);
+}
+
+// Copy a project share link to the clipboard, falling back to a legacy
+// execCommand copy when the async Clipboard API is unavailable (e.g. non-HTTPS).
+function copyShareLink(url) {
+  const done = () => toast('Lien de partage copié');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(done).catch(() => legacyCopy(url, done));
+  } else {
+    legacyCopy(url, done);
+  }
+}
+
+function legacyCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); }
+  catch (_) { toast(text); } // last resort: show it so the user can copy manually
+  finally { ta.remove(); }
 }
 
 // Top summary numbers (recomputed in place, no full re-render).

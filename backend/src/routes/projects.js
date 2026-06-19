@@ -38,6 +38,16 @@ async function buildChecklistFromCatalog(referentialId) {
   }));
 }
 
+// Generate a share token that is not already taken (collisions are astronomically
+// unlikely at 64 bits, but the retry keeps the unique constraint from ever firing).
+async function uniqueShareSlug() {
+  for (let i = 0; i < 5; i++) {
+    const slug = Project.genShareSlug();
+    if (!(await Project.findOne({ where: { shareSlug: slug } }))) return slug;
+  }
+  return Project.genShareSlug();
+}
+
 // GET /api/projects  — list (lightweight, with progress)
 router.get('/', async (_req, res) => {
   const projects = await Project.findAll({ order: [['updatedAt', 'DESC']] });
@@ -50,6 +60,7 @@ router.get('/', async (_req, res) => {
     return {
       _id: p.id,
       name: p.name,
+      shareSlug: p.shareSlug,
       status: p.status,
       referential: names[p.referentialId] || null,
       updatedAt: p.updatedAt,
@@ -79,9 +90,20 @@ router.post('/', async (req, res) => {
     status: status || 'active',
     ownerId: req.user.id,
     referentialId,
+    shareSlug: await uniqueShareSlug(),
     checklist,
   });
   res.status(201).json({ project });
+});
+
+// GET /api/projects/by-slug/:slug  — resolve a share link to its project. Same
+// payload as the detail route so the frontend can open it in one round-trip.
+// Declared before "/:id" so the two-segment path is matched here, not there.
+router.get('/by-slug/:slug', async (req, res) => {
+  const project = await Project.findOne({ where: { shareSlug: req.params.slug } });
+  if (!project) return res.status(404).json({ error: 'Projet introuvable' });
+  const names = await referentialNameMap();
+  res.json({ project, referentialName: names[project.referentialId] || null });
 });
 
 // GET /api/projects/:id  — full detail

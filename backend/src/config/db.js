@@ -34,6 +34,10 @@ async function connectDB() {
       await sequelize.query('ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "ssoProvider" VARCHAR');
       await sequelize.query('ALTER TABLE "vuln_items" ADD COLUMN IF NOT EXISTS "referentialId" UUID');
       await sequelize.query('ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "referentialId" UUID');
+      // Shareable per-project deep-link token. The unique index tolerates the
+      // NULLs left on existing rows until seed.js backfills them.
+      await sequelize.query('ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "shareSlug" VARCHAR(16)');
+      await sequelize.query('CREATE UNIQUE INDEX IF NOT EXISTS "projects_shareSlug_uniq" ON "projects" ("shareSlug")');
       console.log('[db] connected to PostgreSQL');
       return;
     } catch (err) {

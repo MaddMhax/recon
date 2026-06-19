@@ -65,6 +65,10 @@ const frontendDir = path.join(__dirname, '..', 'frontend');
 app.get('/admin', (_req, res) => res.sendFile(path.join(frontendDir, 'admin.html')));
 app.get('/reset', (_req, res) => res.sendFile(path.join(frontendDir, 'reset.html')));
 
+// Project share links (/p/<slug>) are client-side routes; serve the SPA shell so
+// the link works on a fresh load/refresh. app.js reads the slug and opens it.
+app.get('/p/:slug', (_req, res) => res.sendFile(path.join(frontendDir, 'index.html')));
+
 app.use(express.static(frontendDir));
 
 // Central error handler

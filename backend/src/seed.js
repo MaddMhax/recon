@@ -1,6 +1,7 @@
 const User = require('./models/User');
 const VulnItem = require('./models/VulnItem');
 const Referential = require('./models/Referential');
+const Project = require('./models/Project');
 const { sequelize } = require('./config/db');
 const { getChecklistTemplate } = require('./data/wstgTemplate');
 
@@ -60,6 +61,17 @@ async function runSeed() {
     }));
     await VulnItem.bulkCreate(docs);
     console.log(`[seed] "Web" referential seeded with ${docs.length} items`);
+  }
+
+  // Backfill share tokens onto projects created before the column existed, so
+  // every project has a shareable deep link.
+  const slugless = await Project.findAll({ where: { shareSlug: null } });
+  for (const p of slugless) {
+    p.shareSlug = Project.genShareSlug();
+    await p.save();
+  }
+  if (slugless.length) {
+    console.log(`[seed] backfilled share links for ${slugless.length} project(s)`);
   }
 }
 
