@@ -155,8 +155,11 @@ async function renderVulns() {
       <td title="Commande renseignée">${v.command ? '✓' : '—'}</td>
       <td>
         <div class="row" style="gap:8px">
+          <span class="drag-handle" draggable="true" title="Glisser pour réordonner">⠿</span>
+          <button class="secondary small btn-top" title="Envoyer en haut de la catégorie" ${i === 0 ? 'disabled' : ''}>⤒</button>
           <button class="secondary small btn-up" title="Monter" ${i === 0 ? 'disabled' : ''}>▲</button>
           <button class="secondary small btn-down" title="Descendre" ${i === g.items.length - 1 ? 'disabled' : ''}>▼</button>
+          <button class="secondary small btn-bottom" title="Envoyer en bas de la catégorie" ${i === g.items.length - 1 ? 'disabled' : ''}>⤓</button>
           <button class="secondary small btn-edit">Modifier</button>
           <button class="danger small btn-del">Suppr.</button>
         </div>
@@ -165,8 +168,20 @@ async function renderVulns() {
     return header + items;
   }).join('') || '<tr><td colspan="4" class="muted">Aucune vulnérabilité.</td></tr>';
 
-  // Move a vuln up (-1) or down (+1) within its category, persist the new global
-  // order, then re-render. The order is reflected in new projects' checklists.
+  // Flatten all categories back to a single ordered id list (keeps categories
+  // grouped so the order stays stable across reloads and in project views),
+  // persist it, then re-render. The order is reflected in new projects' checklists.
+  const persistOrder = async () => {
+    const ids = groups.flatMap((g) => g.items.map((x) => x._id));
+    try {
+      await api.post('/api/admin/vulns/reorder', { ids });
+    } catch (err) {
+      alert(err.message);
+    }
+    renderVulns();
+  };
+
+  // Move a vuln up (-1) or down (+1) within its category.
   const move = async (id, dir) => {
     for (const g of groups) {
       const i = g.items.findIndex((x) => x._id === id);
@@ -176,25 +191,33 @@ async function renderVulns() {
       [g.items[i], g.items[j]] = [g.items[j], g.items[i]];
       break;
     }
-    // Flatten all categories back to a single ordered id list (keeps categories
-    // grouped so the order stays stable across reloads and in project views).
-    const ids = groups.flatMap((g) => g.items.map((x) => x._id));
-    try {
-      await api.post('/api/admin/vulns/reorder', { ids });
-      renderVulns();
-    } catch (err) {
-      alert(err.message);
-      renderVulns();
+    await persistOrder();
+  };
+
+  // Send a vuln to the top or bottom of its own category.
+  const moveTo = async (id, edge) => {
+    for (const g of groups) {
+      const i = g.items.findIndex((x) => x._id === id);
+      if (i === -1) continue;
+      const [item] = g.items.splice(i, 1);
+      if (edge === 'top') g.items.unshift(item);
+      else g.items.push(item);
+      break;
     }
+    await persistOrder();
   };
 
   rows.querySelectorAll('tr[data-id]').forEach((tr) => {
     const id = tr.dataset.id;
     const v = vulns.find((x) => x._id === id);
+    const top = tr.querySelector('.btn-top');
     const up = tr.querySelector('.btn-up');
     const down = tr.querySelector('.btn-down');
+    const bottom = tr.querySelector('.btn-bottom');
+    if (top && !top.disabled) top.addEventListener('click', () => moveTo(id, 'top'));
     if (up && !up.disabled) up.addEventListener('click', () => move(id, -1));
     if (down && !down.disabled) down.addEventListener('click', () => move(id, 1));
+    if (bottom && !bottom.disabled) bottom.addEventListener('click', () => moveTo(id, 'bottom'));
     tr.querySelector('.btn-del').addEventListener('click', async () => {
       if (!confirm(`Supprimer ${v.code} du référentiel ?`)) return;
       await api.del(`/api/admin/vulns/${id}`);
@@ -202,6 +225,51 @@ async function renderVulns() {
     });
     tr.querySelector('.btn-edit').addEventListener('click', () => openEditRow(tr, v));
   });
+
+  // ---- Drag-and-drop reordering (constrained to a category) ----
+  // Dragging only rearranges rows within their own category — never across a
+  // category header. The new order is read back from the DOM and persisted via
+  // the same /reorder endpoint as the arrow buttons.
+  let dragId = null;
+  const groupOfId = (id) => groups.find((g) => g.items.some((x) => x._id === id));
+
+  rows.querySelectorAll('.drag-handle').forEach((handle) => {
+    const tr = handle.closest('tr[data-id]');
+    handle.addEventListener('dragstart', (e) => {
+      dragId = tr.dataset.id;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', dragId); // required for Firefox
+      if (e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(tr, 0, 0);
+      tr.classList.add('dragging');
+    });
+    handle.addEventListener('dragend', async () => {
+      tr.classList.remove('dragging');
+      const id = dragId;
+      dragId = null;
+      const g = id && groupOfId(id);
+      if (!g) return;
+      // Reorder this category's items to match the (possibly changed) DOM order.
+      const domIds = [...rows.querySelectorAll('tr[data-id]')].map((r) => r.dataset.id);
+      const before = g.items.map((x) => x._id).join(',');
+      g.items.sort((a, b) => domIds.indexOf(a._id) - domIds.indexOf(b._id));
+      if (g.items.map((x) => x._id).join(',') !== before) await persistOrder();
+    });
+  });
+
+  rows.addEventListener('dragover', (e) => {
+    if (!dragId) return;
+    const target = e.target.closest && e.target.closest('tr[data-id]');
+    if (!target || target.dataset.id === dragId) return;
+    if (groupOfId(target.dataset.id) !== groupOfId(dragId)) return; // same category only
+    e.preventDefault();
+    const dragging = rows.querySelector(`tr[data-id="${CSS.escape(dragId)}"]`);
+    if (!dragging || dragging === target) return;
+    const rect = target.getBoundingClientRect();
+    const after = e.clientY > rect.top + rect.height / 2;
+    target.parentNode.insertBefore(dragging, after ? target.nextSibling : target);
+  });
+  // Allow the drop (suppresses the browser's default drag handling).
+  rows.addEventListener('drop', (e) => { if (dragId) e.preventDefault(); });
 
   const catFilter = document.getElementById('catFilter');
   if (catFilter) catFilter.addEventListener('change', () => { vulnCatFilter = catFilter.value; renderVulns(); });

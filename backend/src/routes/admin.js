@@ -272,7 +272,11 @@ router.patch('/users/:id', async (req, res) => {
     }
     update.role = role;
   }
-  if (req.body.password) update.passwordHash = await User.hashPassword(req.body.password);
+  if (req.body.password) {
+    update.passwordHash = await User.hashPassword(req.body.password);
+    // Force the target user's existing sessions to expire after a password reset.
+    update.tokenVersion = (user.tokenVersion || 0) + 1;
+  }
   await user.update(update);
   res.json({ user });
 });

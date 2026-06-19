@@ -7,6 +7,7 @@ const cookieParser = require('cookie-parser');
 const { connectDB } = require('./config/db');
 const { runSeed } = require('./seed');
 const { initRealtime } = require('./realtime');
+const { issueCsrfToken, requireCsrf } = require('./middleware/csrf');
 const authRoutes = require('./routes/auth');
 const projectRoutes = require('./routes/projects');
 const adminRoutes = require('./routes/admin');
@@ -48,6 +49,13 @@ app.use((_req, res, next) => {
   next();
 });
 
+// CSRF: hand every client a double-submit token cookie, then require a matching
+// X-CSRF-Token header on all state-changing requests (skips GET/HEAD/OPTIONS, so
+// static assets and page loads are unaffected). Mounted before the routes so it
+// guards every POST/PUT/PATCH/DELETE in the app.
+app.use(issueCsrfToken);
+app.use(requireCsrf);
+
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
@@ -64,6 +72,7 @@ const frontendDir = path.join(__dirname, '..', 'frontend');
 // served by express.static at /admin.html, but not at /admin).
 app.get('/admin', (_req, res) => res.sendFile(path.join(frontendDir, 'admin.html')));
 app.get('/reset', (_req, res) => res.sendFile(path.join(frontendDir, 'reset.html')));
+app.get('/profile', (_req, res) => res.sendFile(path.join(frontendDir, 'profile.html')));
 
 // Project share links (/p/<slug>) are client-side routes; serve the SPA shell so
 // the link works on a fresh load/refresh. app.js reads the slug and opens it.

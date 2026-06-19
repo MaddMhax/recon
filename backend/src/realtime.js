@@ -45,13 +45,27 @@ function emitPresence(io, room) {
 function initRealtime(server) {
   const io = new Server(server, { path: '/socket.io' });
 
+  // Reject cross-origin WebSocket handshakes (cross-site WebSocket hijacking is
+  // a cookie-borne sibling of CSRF). Browsers always send Origin on a WS upgrade;
+  // a non-browser client without Origin is allowed through to the auth check.
+  io.use((socket, next) => {
+    const origin = socket.handshake.headers.origin;
+    if (!origin) return next();
+    try {
+      if (new URL(origin).host === socket.handshake.headers.host) return next();
+    } catch (_) { /* malformed Origin — fall through to reject */ }
+    next(new Error('forbidden origin'));
+  });
+
   // Authenticate every socket from the signed JWT cookie (same as REST).
   io.use(async (socket, next) => {
     try {
       const cookies = parseCookies(socket.handshake.headers.cookie);
       const payload = jwt.verify(cookies.token, process.env.JWT_SECRET);
       // Load profile bits (color + avatar presence) without the avatar bytes.
-      const u = await User.findByPk(payload.id, { attributes: ['color', 'updatedAt', 'avatarType'] });
+      const u = await User.findByPk(payload.id, { attributes: ['color', 'updatedAt', 'avatarType', 'tokenVersion'] });
+      // Reject sessions revoked by a password change (same check as REST).
+      if (!u || (u.tokenVersion || 0) !== (payload.tv || 0)) return next(new Error('unauthorized'));
       socket.data.user = {
         id: payload.id,
         email: payload.email,

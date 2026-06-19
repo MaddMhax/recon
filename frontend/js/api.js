@@ -2,6 +2,17 @@
 // the server can tell collaborators apart from the author of a change.
 let SOCKET_ID = null;
 
+// Read a cookie value by name (used for the double-submit CSRF token).
+function readCookie(name) {
+  for (const c of document.cookie.split('; ')) {
+    const i = c.indexOf('=');
+    if (i !== -1 && c.slice(0, i) === name) return decodeURIComponent(c.slice(i + 1));
+  }
+  return null;
+}
+
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
 // Thin wrapper around fetch for the JSON API. Cookies carry the session.
 const api = {
   async request(method, url, body) {
@@ -11,6 +22,12 @@ const api = {
       credentials: 'same-origin',
     };
     if (SOCKET_ID) opts.headers['x-socket-id'] = SOCKET_ID;
+    // Echo the CSRF cookie back in a header on state-changing requests so the
+    // server's double-submit check passes (the cookie is set on page load).
+    if (MUTATING_METHODS.has(method)) {
+      const csrf = readCookie('csrf');
+      if (csrf) opts.headers['X-CSRF-Token'] = csrf;
+    }
     if (body !== undefined) opts.body = JSON.stringify(body);
     const res = await fetch(url, opts);
     let data = null;

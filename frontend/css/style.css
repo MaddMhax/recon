@@ -165,8 +165,16 @@ label { display: block; font-size: .85rem; color: var(--muted); margin: 10px 0 4
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
 
+/* Checklist filter bar */
+.filter-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 12px 14px; }
+.filter-bar input, .filter-bar select { width: auto; }
+.filter-bar .flt-search { flex: 1; min-width: 220px; }
+
 /* Login */
 .login-wrap { max-width: 380px; margin: 8vh auto; }
+
+/* Profile page */
+.profile-wrap { max-width: 640px; margin: 0 auto; }
 
 /* Project list cards */
 .project-card {
@@ -372,7 +380,7 @@ ol.sso-help code { word-break: break-all; }
 .badge.tag-local { background: #2a2f35; color: var(--muted); }
 
 /* Stats */
-.stats { display: flex; gap: 18px; flex-wrap: wrap; }
+.stats { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 16px; }
 .stat { background: var(--panel-2); border-radius: var(--radius); padding: 10px 16px; }
 .stat .n { font-size: 1.4rem; font-weight: 700; }
 .stat .l { color: var(--muted); font-size: .78rem; text-transform: uppercase; }
@@ -389,9 +397,23 @@ ol.sso-help code { word-break: break-all; }
   opacity: 0; transform: translateY(10px); transition: all .2s;
 }
 .toast.show { opacity: 1; transform: translateY(0); }
+/* Drag-and-drop reordering (admin referential) */
+.drag-handle {
+  cursor: grab;
+  user-select: none;
+  color: var(--muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 2px;
+}
+.drag-handle:active { cursor: grabbing; }
+tr.dragging { opacity: .45; }
+tr.dragging .ci-code, tr.dragging td { background: var(--panel-2); }
+
 .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
-.tabs button { background: var(--panel-2); border: 1px solid var(--border); }
-.tabs button.active { background: var(--accent); border-color: var(--accent); }
+.tabs button { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font-weight: 400; }
+.tabs button:hover { background: var(--border); }
+.tabs button.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 /* Anchors styled as buttons (landing CTAs) */
 a.btn { display: inline-block; text-decoration: none; }

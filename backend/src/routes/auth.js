@@ -45,7 +45,7 @@ async function findByValidResetToken(token) {
 
 function signToken(user) {
   return jwt.sign(
-    { id: user.id, email: user.email, role: user.role },
+    { id: user.id, email: user.email, role: user.role, tv: user.tokenVersion || 0 },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '12h' }
   );
@@ -165,6 +165,55 @@ router.patch('/me', requireAuth, async (req, res) => {
   res.json({ user });
 });
 
+// Throttle current-password guessing on the change-password endpoint, keyed by
+// the authenticated user (falls back to IP). Separate from the login limiter so
+// the two don't share a budget.
+const pwAttempts = new Map(); // key -> { count, resetAt }
+function passwordChangeRateLimit(req, res, next) {
+  const key = (req.user && req.user.id) || req.ip || 'unknown';
+  const now = Date.now();
+  let e = pwAttempts.get(key);
+  if (!e || now > e.resetAt) {
+    e = { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+    pwAttempts.set(key, e);
+  }
+  if (e.count >= LOGIN_MAX) {
+    const retry = Math.ceil((e.resetAt - now) / 1000);
+    res.setHeader('Retry-After', String(retry));
+    return res.status(429).json({ error: `Trop de tentatives. Réessayez dans ${retry}s.` });
+  }
+  e.count += 1;
+  next();
+}
+
+// POST /api/auth/me/password  — change own password (requires the current one)
+router.post('/me/password', requireAuth, passwordChangeRateLimit, async (req, res) => {
+  const user = await User.findByPk(req.user.id);
+  if (!user) return res.status(401).json({ error: 'User no longer exists' });
+
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: 'Mot de passe actuel et nouveau mot de passe requis' });
+  }
+  if (!(await user.verifyPassword(currentPassword))) {
+    return res.status(400).json({ error: 'Mot de passe actuel incorrect' });
+  }
+  if (String(newPassword).length < 8) {
+    return res.status(400).json({ error: 'Le nouveau mot de passe doit faire au moins 8 caractères' });
+  }
+
+  user.passwordHash = await User.hashPassword(newPassword);
+  // Revoke every other session and any outstanding reset link, then re-issue a
+  // fresh cookie so the user who just changed their password stays signed in.
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
+  user.resetTokenHash = null;
+  user.resetTokenExpires = null;
+  await user.save();
+  pwAttempts.delete(req.user.id); // reset the counter on success
+  setAuthCookie(res, signToken(user));
+  res.json({ ok: true });
+});
+
 // GET /api/auth/reset/:token  — check a reset link's validity (public)
 router.get('/reset/:token', async (req, res) => {
   const user = await findByValidResetToken(req.params.token);
@@ -185,6 +234,8 @@ router.post('/reset', async (req, res) => {
   if (!user) return res.status(400).json({ error: 'Lien invalide ou expiré' });
 
   user.passwordHash = await User.hashPassword(password);
+  // Invalidate any session opened before the reset (the whole point of a reset).
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
   user.resetTokenHash = null;
   user.resetTokenExpires = null;
   await user.save();

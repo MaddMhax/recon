@@ -63,6 +63,10 @@ User.init(
     // Set to the SSO provider key when the account was provisioned via SSO;
     // null for accounts created locally (with a password).
     ssoProvider: { type: DataTypes.STRING, allowNull: true, defaultValue: null },
+    // Bumped whenever the password changes (self-service, reset link, or admin
+    // reset). Embedded in the JWT as `tv` and checked on every request, so an
+    // old token — i.e. a session opened before the change — stops being accepted.
+    tokenVersion: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
   },
   {
     sequelize,

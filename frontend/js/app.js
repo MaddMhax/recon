@@ -11,6 +11,9 @@ let currentProject = null;     // the project currently open (in-memory copy)
 let currentProjectId = null;
 let presenceUsers = [];        // [{ socketId, id, email, focus }]
 let pendingRedraw = false;     // a remote change arrived while we were typing
+// Checklist filter state for the open project (text + status + category). Reset
+// whenever a project is opened; applied by drawChecklist on every redraw.
+let checklistFilter = { text: '', status: 'all', category: 'all' };
 
 // ---- Bootstrap : vérifie la session ----
 async function init() {
@@ -225,6 +228,7 @@ async function renderProjectList() {
 // ====================================================================
 async function renderProjectDetail(id, opts = {}) {
   currentProjectId = id;
+  checklistFilter = { text: '', status: 'all', category: 'all' }; // fresh per project
   if (socket) socket.emit('join', id);
   const { project, referentialName } = opts.preloaded || await api.get(`/api/projects/${id}`);
   currentProject = project;
@@ -239,7 +243,7 @@ async function renderProjectDetail(id, opts = {}) {
 
   main().innerHTML = `
     <div class="row">
-      <a href="#" id="backLink">← Projets</a>
+      <button class="secondary small" id="backLink">← Projets</button>
     </div>
     <div class="row" style="margin-top:8px">
       <h1>${esc(project.name)}</h1>
@@ -284,11 +288,14 @@ async function renderProjectDetail(id, opts = {}) {
       <div class="row" style="margin-top:8px"><button class="small" id="varSave">Enregistrer les variables</button></div>
     </div>
 
+    ${checklistFilterHTML(project)}
+
     <div id="checklist" style="margin-top:16px"></div>
   `;
   project.variables = project.variables || [];
   renderStats(project);
   renderVariables(id, project);
+  wireChecklistFilter(id, project);
   renderPresence();
 
   document.getElementById('backLink').addEventListener('click', (e) => { e.preventDefault(); renderProjectList(); });
@@ -428,12 +435,95 @@ function refreshPreviews(project) {
   });
 }
 
+// ---- Checklist search / filter ----
+
+// Distinct categories present in a project's checklist (sorted, "Autres" last).
+function checklistCategories(project) {
+  const set = new Set((project.checklist || []).map((c) => (c.category || '').trim() || 'Autres'));
+  return [...set].sort((a, b) => {
+    if (a === 'Autres') return 1;
+    if (b === 'Autres') return -1;
+    return a.localeCompare(b, 'fr', { sensitivity: 'base' });
+  });
+}
+
+// Filter bar shown above the checklist (omitted for an empty referential).
+function checklistFilterHTML(project) {
+  if (!(project.checklist || []).length) return '';
+  const cats = checklistCategories(project)
+    .map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  return `
+    <div class="filter-bar panel" id="checklistFilter">
+      <input id="flText" class="flt-search" placeholder="Rechercher (code, nom, description, notes)…" />
+      <select id="flStatus" title="Filtrer par statut">
+        <option value="all">Tous les statuts</option>
+        <option value="unverified">Non vérifiées</option>
+        <option value="vuln">Vulnérables</option>
+        <option value="safe">Non vulnérables</option>
+        <option value="undecided">À décider</option>
+      </select>
+      <select id="flCategory" title="Filtrer par catégorie">
+        <option value="all">Toutes les catégories</option>
+        ${cats}
+      </select>
+      <div class="spacer"></div>
+      <span class="muted small" id="flCount"></span>
+      <button class="secondary small" id="flReset">Réinitialiser</button>
+    </div>`;
+}
+
+// Wire the filter controls. Lives outside #checklist so redraws (after an item
+// change or a remote update) never steal focus from the search box.
+function wireChecklistFilter(projectId, project) {
+  const bar = document.getElementById('checklistFilter');
+  if (!bar) return;
+  const apply = () => drawChecklist(projectId, project);
+  bar.querySelector('#flText').addEventListener('input', (e) => { checklistFilter.text = e.target.value; apply(); });
+  bar.querySelector('#flStatus').addEventListener('change', (e) => { checklistFilter.status = e.target.value; apply(); });
+  bar.querySelector('#flCategory').addEventListener('change', (e) => { checklistFilter.category = e.target.value; apply(); });
+  bar.querySelector('#flReset').addEventListener('click', () => {
+    checklistFilter = { text: '', status: 'all', category: 'all' };
+    bar.querySelector('#flText').value = '';
+    bar.querySelector('#flStatus').value = 'all';
+    bar.querySelector('#flCategory').value = 'all';
+    apply();
+  });
+}
+
+// Does one checklist item pass the active filter?
+function itemMatchesFilter(it, f) {
+  if (f.status === 'unverified' && it.verified) return false;
+  if (f.status === 'vuln' && !(it.verified && it.vulnerable === true)) return false;
+  if (f.status === 'safe' && !(it.verified && it.vulnerable === false)) return false;
+  if (f.status === 'undecided' && !(it.verified && it.vulnerable === null)) return false;
+  if (f.category !== 'all' && ((it.category || '').trim() || 'Autres') !== f.category) return false;
+  const t = f.text.trim().toLowerCase();
+  if (t) {
+    const hay = [it.code, it.name, it.description, it.category, it.notes]
+      .map((x) => (x || '').toLowerCase()).join(' ');
+    if (!hay.includes(t)) return false;
+  }
+  return true;
+}
+
 function drawChecklist(projectId, project) {
   const container = document.getElementById('checklist');
   const items = project.checklist;
 
   if (!items.length) {
     container.innerHTML = `<p class="muted">Référentiel vide. Ajoutez des vulnérabilités dans l'administration.</p>`;
+    return;
+  }
+
+  // Apply the active search / status / category filter before grouping.
+  const filtered = items.filter((it) => itemMatchesFilter(it, checklistFilter));
+  const count = document.getElementById('flCount');
+  if (count) count.textContent = filtered.length === items.length
+    ? `${items.length} vérification(s)`
+    : `${filtered.length} / ${items.length}`;
+
+  if (!filtered.length) {
+    container.innerHTML = `<p class="muted">Aucune vérification ne correspond aux filtres.</p>`;
     return;
   }
 
@@ -444,7 +534,7 @@ function drawChecklist(projectId, project) {
   // sorted alphabetically, with the catch-all "Autres" group last.
   const groups = [];
   const byCat = new Map();
-  for (const it of items) {
+  for (const it of filtered) {
     const cat = (it.category || '').trim() || 'Autres';
     let g = byCat.get(cat);
     if (!g) { g = { category: cat, items: [] }; byCat.set(cat, g); groups.push(g); }

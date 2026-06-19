@@ -8,7 +8,9 @@
 </head>
 <body>
   <!-- ============ Écran de connexion ============ -->
-  <div id="loginView">
+  <!-- Hidden until init() resolves the session, so a refresh while logged in
+       doesn't flash the login screen before the app appears. -->
+  <div id="loginView" class="hidden">
     <header class="topbar">
       <div class="brand">RECON<span>_</span></div>
       <nav>
@@ -44,10 +46,9 @@
       <nav>
         <a href="#" id="navProjects">Projets</a>
         <a href="/admin" id="navAdmin" class="hidden">Administration</a>
-        <button class="user-btn" id="profileBtn" type="button" title="Personnaliser">
+        <button class="user-btn" id="profileBtn" type="button" title="Mon profil">
           <span class="user-chip" id="navAvatar"></span>
           <span class="user" id="navUser"></span>
-          <span class="caret">▾</span>
         </button>
         <button class="theme-toggle secondary small" type="button" title="Thème clair / sombre">☀️</button>
         <button class="secondary small" id="logoutBtn">Déconnexion</button>

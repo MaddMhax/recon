@@ -32,6 +32,7 @@ async function connectDB() {
       // Idempotent additive migrations for columns introduced after the initial
       // release (sync() does not alter existing tables). Safe to run every boot.
       await sequelize.query('ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "ssoProvider" VARCHAR');
+      await sequelize.query('ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "tokenVersion" INTEGER NOT NULL DEFAULT 0');
       await sequelize.query('ALTER TABLE "vuln_items" ADD COLUMN IF NOT EXISTS "referentialId" UUID');
       await sequelize.query('ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "referentialId" UUID');
       // Shareable per-project deep-link token. The unique index tolerates the
