@@ -1,6 +1,7 @@
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const User = require('./models/User');
+const { isUuid } = require('./config/db');
 
 // Minimal cookie header parser (avoids pulling an extra dependency).
 function parseCookies(header = '') {
@@ -16,6 +17,18 @@ function parseCookies(header = '') {
 }
 
 const roomOf = (projectId) => `project:${projectId}`;
+
+// Profile bits shown in presence (color + avatar presence), without the bytes.
+const loadProfile = (id) =>
+  User.findByPk(id, { attributes: ['id', 'email', 'color', 'updatedAt', 'avatarType', 'tokenVersion'] });
+
+const profileOf = (u) => ({
+  id: u.id,
+  email: u.email,
+  color: u.color || null,
+  hasAvatar: !!u.avatarType,
+  avatarVersion: u.updatedAt ? new Date(u.updatedAt).getTime() : 0,
+});
 
 // Broadcast the live list of users present in a room (with what they focus).
 function emitPresence(io, room) {
@@ -61,18 +74,11 @@ function initRealtime(server) {
   io.use(async (socket, next) => {
     try {
       const cookies = parseCookies(socket.handshake.headers.cookie);
-      const payload = jwt.verify(cookies.token, process.env.JWT_SECRET);
-      // Load profile bits (color + avatar presence) without the avatar bytes.
-      const u = await User.findByPk(payload.id, { attributes: ['color', 'updatedAt', 'avatarType', 'tokenVersion'] });
-      // Reject sessions revoked by a password change (same check as REST).
+      const payload = jwt.verify(cookies.token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      // Reject sessions revoked by a password change or logout (same check as REST).
+      const u = await loadProfile(payload.id);
       if (!u || (u.tokenVersion || 0) !== (payload.tv || 0)) return next(new Error('unauthorized'));
-      socket.data.user = {
-        id: payload.id,
-        email: payload.email,
-        color: (u && u.color) || null,
-        hasAvatar: !!(u && u.avatarType),
-        avatarVersion: u && u.updatedAt ? new Date(u.updatedAt).getTime() : 0,
-      };
+      socket.data.user = profileOf(u);
       next();
     } catch (_) {
       next(new Error('unauthorized'));
@@ -83,7 +89,7 @@ function initRealtime(server) {
     let room = null;
 
     socket.on('join', (projectId) => {
-      if (!projectId) return;
+      if (!isUuid(projectId)) return;
       if (room) { socket.leave(room); emitPresence(io, room); }
       room = roomOf(projectId);
       socket.data.focus = null;
@@ -102,18 +108,20 @@ function initRealtime(server) {
 
     // What the user is currently editing, e.g. "item:<id>" or "variables".
     socket.on('focus', (field) => {
-      socket.data.focus = field || null;
+      socket.data.focus = typeof field === 'string' ? field.slice(0, 64) : null;
       if (room) emitPresence(io, room);
     });
 
     // The user changed their profile (color / avatar) — refresh presence live.
-    socket.on('profile', (p) => {
-      if (p && typeof p === 'object') {
-        if (typeof p.color === 'string' || p.color === null) socket.data.user.color = p.color || null;
-        socket.data.user.hasAvatar = !!p.hasAvatar;
-        socket.data.user.avatarVersion = Date.now();
-      }
-      if (room) emitPresence(io, room);
+    // The new values are re-read from the database (already validated by
+    // PATCH /api/auth/me), never taken from the client message.
+    socket.on('profile', async () => {
+      try {
+        const u = await loadProfile(socket.data.user.id);
+        if (!u) return socket.disconnect(true);
+        socket.data.user = profileOf(u);
+        if (room) emitPresence(io, room);
+      } catch (_) { /* keep the previous profile */ }
     });
 
     socket.on('disconnect', () => {

@@ -11,6 +11,11 @@ const { broadcast } = require('../realtime');
 const router = express.Router();
 router.use(requireAuth);
 
+const PROJECT_STATUSES = ['planning', 'active', 'reporting', 'completed', 'archived'];
+// Free-text fields are stored and re-rendered for every collaborator: accept
+// strings only (never objects/arrays smuggled into the JSONB checklist).
+const str = (v) => (v == null ? '' : String(v));
+
 // { referentialId: name } map, for labelling projects in responses.
 async function referentialNameMap() {
   const refs = await Referential.findAll();
@@ -73,7 +78,7 @@ router.get('/', async (_req, res) => {
 // POST /api/projects
 router.post('/', async (req, res) => {
   const { name, scope, notes, status } = req.body || {};
-  if (!name || !name.trim()) {
+  if (typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Le nom du projet est requis' });
   }
   // Resolve the chosen referential, falling back to the default one.
@@ -85,9 +90,9 @@ router.post('/', async (req, res) => {
   const checklist = referentialId ? await buildChecklistFromCatalog(referentialId) : [];
   const project = await Project.create({
     name: name.trim(),
-    scope: scope || '',
-    notes: notes || '',
-    status: status || 'active',
+    scope: str(scope),
+    notes: str(notes),
+    status: PROJECT_STATUSES.includes(status) ? status : 'active',
     ownerId: req.user.id,
     referentialId,
     shareSlug: await uniqueShareSlug(),
@@ -127,8 +132,15 @@ router.patch('/:id', async (req, res) => {
       update.variables = Array.isArray(req.body.variables)
         ? req.body.variables.map((v) => ({ name: String((v && v.name) || ''), value: String((v && v.value) || '') }))
         : [];
+    } else if (k === 'status') {
+      if (!PROJECT_STATUSES.includes(req.body.status)) return res.status(400).json({ error: 'Statut invalide' });
+      update.status = req.body.status;
+    } else if (k === 'name') {
+      const name = str(req.body.name).trim();
+      if (!name) return res.status(400).json({ error: 'Le nom du projet est requis' });
+      update.name = name;
     } else {
-      update[k] = req.body[k];
+      update[k] = str(req.body[k]);
     }
   }
   await project.update(update);
@@ -161,7 +173,7 @@ router.patch('/:id/checklist/:itemId', async (req, res) => {
     if (req.body[k] === undefined) continue;
     if (k === 'verified') item.verified = !!req.body[k];
     else if (k === 'vulnerable') item.vulnerable = req.body[k] === null ? null : !!req.body[k];
-    else item[k] = req.body[k];
+    else item[k] = str(req.body[k]);
   }
   // While unverified, the vulnerability decision is reset to "not decided".
   if (item.verified === false) item.vulnerable = null;

@@ -41,9 +41,14 @@ services:
       # cookie and every page reload logs you out. Set to "true" once a TLS
       # reverse proxy is in front of the app.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Number of reverse-proxy hops to trust for X-Forwarded-* (client IP and
+      # https detection). Leave "false" when the port is exposed directly —
+      # otherwise clients can spoof their IP. Set to "1" behind one TLS proxy.
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       PORT: 3000
       DATABASE_URL: postgres://${POSTGRES_USER:-recon}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-recon}
-      JWT_SECRET: ${JWT_SECRET:-please-change-this-secret}
+      # Required, no default: a known secret lets anyone forge admin sessions.
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (openssl rand -hex 32)}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin1234}

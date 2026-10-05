@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Recon — Audits de sécurité web (OWASP WSTG)</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<!-- Served only to an authenticated session (server.js). Kept hidden until
+     app.js has re-confirmed the session (see base.js markAuthenticated). -->
+<body data-auth="required">
+  <header class="topbar">
+    <a href="/" class="brand" id="brandHome" title="Liste des projets">RECON<span>_</span></a>
+    <nav>
+      <a href="#" id="navProjects">Projets</a>
+      <a href="/admin" id="navAdmin" class="hidden">Administration</a>
+      <button class="user-btn" id="profileBtn" type="button" title="Mon profil">
+        <span class="user-chip" id="navAvatar"></span>
+        <span class="user" id="navUser"></span>
+      </button>
+      <button class="theme-toggle secondary small" type="button" title="Thème clair / sombre">☀️</button>
+      <button class="secondary small" id="logoutBtn">Déconnexion</button>
+    </nav>
+  </header>
+  <main id="appMain"></main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/base.js"></script>
+  <script src="/js/profile.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

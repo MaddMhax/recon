@@ -28,7 +28,9 @@ function chipHtml(u, cls) {
   if (u.hasAvatar) {
     return `<img class="${cls}" src="${avatarUrlOf(u)}" alt="" title="${title}" loading="lazy" />`;
   }
-  const c = u.color || colorFor(u.email || '');
+  // Colors arrive from other users via realtime presence: only a strict
+  // #RRGGBB may reach the style attribute.
+  const c = /^#[0-9a-fA-F]{6}$/.test(u.color || '') ? u.color : colorFor(u.email || '');
   return `<span class="${cls}" style="background:${c}" title="${title}">${esc(initials(u.email || ''))}</span>`;
 }
 

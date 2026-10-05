@@ -447,3 +447,8 @@ a.btn:hover { text-decoration: none; }
   .grid.cols-2 { grid-template-columns: 1fr; }
   .features { grid-template-columns: 1fr; }
 }
+
+/* Authenticated pages stay blank until their script has confirmed the session
+   (base.js markAuthenticated). The server already refuses to serve them without
+   one; this also covers pages restored from the back/forward cache. */
+body[data-auth="required"]:not(.auth-ok) > * { visibility: hidden; }

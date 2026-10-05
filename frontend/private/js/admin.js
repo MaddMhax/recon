@@ -25,14 +25,16 @@ async function init() {
     const { user } = await api.get('/api/auth/me');
     me = user;
   } catch (_) {
-    window.location.href = '/';
+    redirectToLogin(); // session gone since the page was served
     return;
   }
+  // The server only serves this page to admins; a role change since then
+  // sends the user back to the app instead of showing the panel.
   if (me.role !== 'admin') {
-    document.getElementById('adminMain').innerHTML =
-      '<h1>Accès refusé</h1><p class="muted">Cette page est réservée aux administrateurs.</p>';
+    window.location.replace('/');
     return;
   }
+  markAuthenticated();
   initProfileMenu(me, (user) => { me = user; });
   setupTabs();
   renderVulns();
@@ -42,8 +44,8 @@ async function init() {
 }
 
 document.getElementById('logoutBtn').addEventListener('click', async () => {
-  await api.post('/api/auth/logout');
-  window.location.href = '/';
+  try { await api.post('/api/auth/logout'); } catch (_) { /* leave anyway */ }
+  window.location.replace('/login');
 });
 
 function setupTabs() {

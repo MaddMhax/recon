@@ -2,6 +2,15 @@
 // Recon — application principale (gestion des projets)
 // ====================================================================
 
+// Project status labels (list badges + edit form).
+const PROJECT_STATUS_LABELS = {
+  planning: 'Cadrage',
+  active: 'En cours',
+  reporting: 'Rédaction',
+  completed: 'Terminé',
+  archived: 'Archivé',
+};
+
 let currentUser = null;
 const main = () => document.getElementById('appMain');
 
@@ -16,51 +25,21 @@ let pendingRedraw = false;     // a remote change arrived while we were typing
 let checklistFilter = { text: '', status: 'all', category: 'all' };
 
 // ---- Bootstrap : vérifie la session ----
+// The server only serves this page to a valid session; re-check it anyway (it
+// may have been revoked since) before rendering anything.
 async function init() {
   try {
     const { user } = await api.get('/api/auth/me');
     currentUser = user;
-    showApp();
   } catch (_) {
-    showLogin();
+    redirectToLogin();
+    return;
   }
-}
-
-function showLogin() {
-  document.getElementById('loginView').classList.remove('hidden');
-  document.getElementById('appView').classList.add('hidden');
-  loadSsoButton();
-  showSsoError();
-}
-
-// Show a "Login with SSO" button (with the provider logo) when SSO is enabled.
-async function loadSsoButton() {
-  const area = document.getElementById('ssoArea');
-  if (!area) return;
-  try {
-    const s = await api.get('/api/auth/sso/status');
-    if (!s || !s.enabled) { area.classList.add('hidden'); area.innerHTML = ''; return; }
-    area.innerHTML = `
-      <div class="sso-divider"><span>ou</span></div>
-      <a class="sso-btn" href="/api/auth/sso/login">${ssoLogo(s.provider)}<span>${esc(s.label || 'Se connecter via SSO')}</span></a>`;
-    area.classList.remove('hidden');
-  } catch (_) {
-    area.classList.add('hidden');
-  }
-}
-
-// Surface an SSO error handed back as ?sso_error=... on the login screen.
-function showSsoError() {
-  const err = new URLSearchParams(window.location.search).get('sso_error');
-  if (!err) return;
-  const el = document.getElementById('loginError');
-  if (el) el.textContent = err;
-  window.history.replaceState({}, '', window.location.pathname); // clean the URL
+  markAuthenticated();
+  showApp();
 }
 
 function showApp() {
-  document.getElementById('loginView').classList.add('hidden');
-  document.getElementById('appView').classList.remove('hidden');
   if (currentUser.role === 'admin') {
     document.getElementById('navAdmin').classList.remove('hidden');
   }
@@ -103,27 +82,9 @@ window.addEventListener('popstate', () => {
   else renderProjectList();
 });
 
-// ---- Connexion ----
-document.getElementById('loginForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const errEl = document.getElementById('loginError');
-  errEl.textContent = '';
-  try {
-    const { user } = await api.post('/api/auth/login', {
-      email: document.getElementById('email').value,
-      password: document.getElementById('password').value,
-    });
-    currentUser = user;
-    showApp();
-  } catch (err) {
-    errEl.textContent = err.message;
-  }
-});
-
 document.getElementById('logoutBtn').addEventListener('click', async () => {
-  await api.post('/api/auth/logout');
-  currentUser = null;
-  showLogin();
+  try { await api.post('/api/auth/logout'); } catch (_) { /* leave anyway */ }
+  window.location.replace('/login');
 });
 
 document.getElementById('navProjects').addEventListener('click', (e) => {
@@ -623,7 +584,7 @@ function checkItemHTML(it, vars) {
       </div>
       <div class="ci-extra">
         ${it.description ? `<p class="ci-desc">${esc(it.description)}</p>` : ''}
-        ${it.reference ? `<a href="${esc(it.reference)}" target="_blank" rel="noopener" class="small">Référence externe ↗</a>` : ''}
+        ${/^https?:\/\//i.test(it.reference || '') ? `<a href="${esc(it.reference)}" target="_blank" rel="noopener" class="small">Référence externe ↗</a>` : ''}
         <div class="cmd-bar"><span class="muted small">Commande de vérification</span><button type="button" class="secondary small cmd-copy">Copier</button></div>
         <div class="cmd-preview">${renderCommand(applyVars(it.command, vars))}</div>
         <label>Notes (optionnel)</label>

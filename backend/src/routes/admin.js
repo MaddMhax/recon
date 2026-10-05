@@ -247,12 +247,15 @@ router.post('/users', async (req, res) => {
   if (!email || !password) {
     return res.status(400).json({ error: 'Email et mot de passe sont requis' });
   }
+  if (String(password).length < 8) {
+    return res.status(400).json({ error: 'Le mot de passe doit faire au moins 8 caractères' });
+  }
   const exists = await User.findOne({ where: { email: String(email).toLowerCase().trim() } });
   if (exists) return res.status(409).json({ error: 'Cet utilisateur existe déjà' });
 
   const user = await User.create({
     email: String(email).toLowerCase().trim(),
-    passwordHash: await User.hashPassword(password),
+    passwordHash: await User.hashPassword(String(password)),
     role: role === 'admin' ? 'admin' : 'auditor',
   });
   res.status(201).json({ user });
@@ -273,7 +276,10 @@ router.patch('/users/:id', async (req, res) => {
     update.role = role;
   }
   if (req.body.password) {
-    update.passwordHash = await User.hashPassword(req.body.password);
+    if (String(req.body.password).length < 8) {
+      return res.status(400).json({ error: 'Le mot de passe doit faire au moins 8 caractères' });
+    }
+    update.passwordHash = await User.hashPassword(String(req.body.password));
     // Force the target user's existing sessions to expire after a password reset.
     update.tokenVersion = (user.tokenVersion || 0) + 1;
   }

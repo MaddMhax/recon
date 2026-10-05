@@ -1,9 +1,11 @@
 const express = require('express');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { getSsoConfig } = require('../models/SsoConfig');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, resolveSession } = require('../middleware/auth');
+const { sanitizeImage } = require('../lib/image');
 
 const router = express.Router();
 
@@ -11,28 +13,19 @@ const hashToken = (t) => crypto.createHash('sha256').update(String(t)).digest('h
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024; // 2 MB
 
-// Strictly parse a data URL into validated PNG/JPEG bytes. Returns null if the
-// MIME is not allowed OR the magic bytes don't match the declared MIME (this
-// rejects SVG, HTML/JS polyglots and spoofed content-types).
+// Parse a data URL into a validated, sanitized PNG/JPEG. Returns null unless
+// the bytes are a well-formed image of the declared type: the full file
+// structure is checked (not just the magic bytes), and the stored copy is
+// rebuilt without metadata or trailing data (see lib/image.js).
 function parseDataUrlImage(dataUrl) {
   if (typeof dataUrl !== 'string') return null;
-  const m = dataUrl.match(/^data:(image\/png|image\/jpeg);base64,([A-Za-z0-9+/=]+)$/);
+  // Cheap size bound before decoding (base64 inflates by 4/3).
+  if (dataUrl.length > Math.ceil(MAX_AVATAR_BYTES * 4 / 3) + 64) return { tooLarge: true };
+  const m = dataUrl.match(/^data:(image\/png|image\/jpeg);base64,([A-Za-z0-9+/]+={0,2})$/);
   if (!m) return null;
-  const contentType = m[1];
-  let data;
-  try {
-    data = Buffer.from(m[2], 'base64');
-  } catch (_) {
-    return null;
-  }
-  if (!data || data.length < 4) return null;
-  const isPng = data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47 &&
-    data[4] === 0x0d && data[5] === 0x0a && data[6] === 0x1a && data[7] === 0x0a;
-  const isJpeg = data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
-  if (contentType === 'image/png' && !isPng) return null;
-  if (contentType === 'image/jpeg' && !isJpeg) return null;
-  if (!isPng && !isJpeg) return null;
-  return { contentType, data };
+  const data = Buffer.from(m[2], 'base64');
+  if (data.length > MAX_AVATAR_BYTES) return { tooLarge: true };
+  return sanitizeImage(data, m[1]);
 }
 
 // Find a user by a still-valid reset token (returns null otherwise).
@@ -47,7 +40,7 @@ function signToken(user) {
   return jwt.sign(
     { id: user.id, email: user.email, role: user.role, tv: user.tokenVersion || 0 },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '12h' }
+    { algorithm: 'HS256', expiresIn: process.env.JWT_EXPIRES_IN || '12h' }
   );
 }
 
@@ -81,6 +74,19 @@ function setAuthCookie(res, token) {
 const LOGIN_MAX = 10;
 const LOGIN_WINDOW_MS = 5 * 60 * 1000;
 const loginAttempts = new Map(); // ip -> { count, resetAt }
+const pwAttempts = new Map(); // user id -> { count, resetAt } (change-password)
+
+// Drop expired throttle entries so the maps cannot grow without bound.
+setInterval(() => {
+  const now = Date.now();
+  for (const m of [loginAttempts, pwAttempts]) {
+    for (const [k, e] of m) if (now > e.resetAt) m.delete(k);
+  }
+}, LOGIN_WINDOW_MS).unref();
+
+// Compared against when the email is unknown, so a login attempt costs one
+// bcrypt check either way and response time does not reveal which emails exist.
+const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 10);
 
 function loginRateLimit(req, res, next) {
   const ip = req.ip || 'unknown';
@@ -106,7 +112,8 @@ router.post('/login', loginRateLimit, async (req, res) => {
     return res.status(400).json({ error: 'Email and password are required' });
   }
   const user = await User.findOne({ where: { email: String(email).toLowerCase().trim() } });
-  if (!user || !(await user.verifyPassword(password))) {
+  const ok = user ? await user.verifyPassword(String(password)) : await bcrypt.compare(String(password), DUMMY_HASH);
+  if (!user || !ok) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
   loginAttempts.delete(req.ip); // reset the counter on success
@@ -115,8 +122,13 @@ router.post('/login', loginRateLimit, async (req, res) => {
 });
 
 // POST /api/auth/logout
-router.post('/logout', (_req, res) => {
-  res.clearCookie('token');
+// Revokes the session server-side (bumps tokenVersion) so a copied or stolen
+// cookie stops working too — not just the browser's copy. Note: this signs the
+// account out on every device, since sessions are not tracked individually.
+router.post('/logout', async (req, res) => {
+  const session = await resolveSession(req.cookies && req.cookies.token);
+  if (session) await User.increment('tokenVersion', { where: { id: session.id } });
+  res.clearCookie('token', { httpOnly: true, sameSite: 'lax', secure: cookieSecure() });
   res.json({ ok: true });
 });
 
@@ -150,11 +162,11 @@ router.patch('/me', requireAuth, async (req, res) => {
       user.avatarType = null;
     } else {
       const parsed = parseDataUrlImage(avatar);
-      if (!parsed) {
-        return res.status(400).json({ error: 'Image invalide : seuls les fichiers JPEG et PNG sont acceptés' });
-      }
-      if (parsed.data.length > MAX_AVATAR_BYTES) {
+      if (parsed && parsed.tooLarge) {
         return res.status(413).json({ error: 'Image trop volumineuse (max 2 Mo)' });
+      }
+      if (!parsed) {
+        return res.status(400).json({ error: 'Image invalide : le fichier doit être une image JPEG ou PNG valide' });
       }
       user.avatarData = parsed.data;
       user.avatarType = parsed.contentType;
@@ -168,7 +180,6 @@ router.patch('/me', requireAuth, async (req, res) => {
 // Throttle current-password guessing on the change-password endpoint, keyed by
 // the authenticated user (falls back to IP). Separate from the login limiter so
 // the two don't share a budget.
-const pwAttempts = new Map(); // key -> { count, resetAt }
 function passwordChangeRateLimit(req, res, next) {
   const key = (req.user && req.user.id) || req.ip || 'unknown';
   const now = Date.now();
@@ -195,7 +206,7 @@ router.post('/me/password', requireAuth, passwordChangeRateLimit, async (req, re
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: 'Mot de passe actuel et nouveau mot de passe requis' });
   }
-  if (!(await user.verifyPassword(currentPassword))) {
+  if (!(await user.verifyPassword(String(currentPassword)))) {
     return res.status(400).json({ error: 'Mot de passe actuel incorrect' });
   }
   if (String(newPassword).length < 8) {
@@ -251,7 +262,7 @@ router.post('/reset', async (req, res) => {
 const ssoRedirectUri = (req) => `${req.protocol}://${req.get('host')}/api/auth/sso/callback`;
 
 // Send the user back to the login screen with a readable error.
-const ssoFail = (res, msg) => res.redirect('/?sso_error=' + encodeURIComponent(msg));
+const ssoFail = (res, msg) => res.redirect('/login?sso_error=' + encodeURIComponent(msg));
 
 // GET /api/auth/sso/status  — what the login page needs to render the button.
 // Never exposes the client id/secret or endpoints.
@@ -290,7 +301,7 @@ router.get('/sso/callback', async (req, res) => {
     const cookieState = req.cookies && req.cookies.sso_state;
     res.clearCookie('sso_state');
     if (!code || !state || !cookieState || state !== cookieState) return ssoFail(res, 'État SSO invalide');
-    try { jwt.verify(String(state), process.env.JWT_SECRET); } catch (_) { return ssoFail(res, 'État SSO expiré'); }
+    try { jwt.verify(String(state), process.env.JWT_SECRET, { algorithms: ['HS256'] }); } catch (_) { return ssoFail(res, 'État SSO expiré'); }
 
     // 1) Exchange the authorization code for an access token.
     const tokenRes = await fetch(cfg.tokenUrl, {
@@ -324,7 +335,12 @@ router.get('/sso/callback', async (req, res) => {
         email = pick && pick.email;
       }
     }
-    if (!email) return ssoFail(res, 'Aucune adresse e-mail fournie par le fournisseur SSO');
+    if (!email || typeof email !== 'string') return ssoFail(res, 'Aucune adresse e-mail fournie par le fournisseur SSO');
+    // Accounts are matched by email, so an address the provider has not verified
+    // could be used to take over an existing local account (e.g. an admin).
+    if (profile.email_verified === false || profile.email_verified === 'false') {
+      return ssoFail(res, "L'adresse e-mail n'est pas vérifiée auprès du fournisseur SSO");
+    }
     email = String(email).toLowerCase().trim();
 
     // 3) Resolve (or provision) the local account.

@@ -11,15 +11,16 @@ async function initProfilePage() {
     const { user } = await api.get('/api/auth/me');
     ME = user;
   } catch (_) {
-    window.location.href = '/'; // not logged in
+    redirectToLogin(); // session gone since the page was served
     return;
   }
+  markAuthenticated();
 
   if (ME.role === 'admin') document.getElementById('navAdmin').classList.remove('hidden');
   initProfileMenu(ME); // header chip + button
   document.getElementById('logoutBtn').addEventListener('click', async () => {
-    await api.post('/api/auth/logout');
-    window.location.href = '/';
+    try { await api.post('/api/auth/logout'); } catch (_) { /* leave anyway */ }
+    window.location.replace('/login');
   });
 
   const sso = !!ME.ssoProvider;
@@ -60,9 +61,19 @@ function initAppearance() {
       e.target.value = '';
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => { avatarPending = reader.result; drawAvatarPreview(); };
-    reader.readAsDataURL(f);
+    // The declared type is only the file extension: check the real bytes and
+    // that the browser can actually decode the picture before offering it.
+    // (The server re-validates the full file structure regardless.)
+    checkImageFile(f).then((problem) => {
+      if (problem) {
+        errEl.textContent = problem;
+        e.target.value = '';
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => { avatarPending = reader.result; drawAvatarPreview(); };
+      reader.readAsDataURL(f);
+    });
   });
 
   document.getElementById('pmRemove').addEventListener('click', () => {
@@ -72,6 +83,30 @@ function initAppearance() {
   });
 
   document.getElementById('pmSave').addEventListener('click', saveAppearance);
+}
+
+const MAX_AVATAR_SIDE = 8192; // same cap as the server (lib/image.js)
+
+// Returns null when the file starts with a PNG/JPEG signature and decodes as
+// an image within the size cap, otherwise the message to show.
+async function checkImageFile(f) {
+  const invalid = "Fichier invalide : ce n'est pas une image JPEG ou PNG valide.";
+  try {
+    const b = new Uint8Array(await f.slice(0, 8).arrayBuffer());
+    const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((v, i) => b[i] === v);
+    const jpeg = b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
+    if (!png && !jpeg) return invalid;
+    const bmp = await createImageBitmap(f);
+    const { width, height } = bmp;
+    bmp.close();
+    if (!width || !height) return invalid;
+    if (width > MAX_AVATAR_SIDE || height > MAX_AVATAR_SIDE) {
+      return `Image trop grande (${width}×${height} px, max ${MAX_AVATAR_SIDE} px de côté).`;
+    }
+    return null;
+  } catch (_) {
+    return invalid;
+  }
 }
 
 function drawAvatarPreview() {

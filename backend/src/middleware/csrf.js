@@ -53,4 +53,4 @@ function requireCsrf(req, res, next) {
   next();
 }
 
-module.exports = { issueCsrfToken, requireCsrf, CSRF_COOKIE, CSRF_HEADER };
+module.exports = { issueCsrfToken, requireCsrf, cookieSecure, CSRF_COOKIE, CSRF_HEADER };

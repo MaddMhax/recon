@@ -9,9 +9,16 @@ Direction artistique « terminal » (vert phosphore, thèmes clair/sombre).
 - **Collaboration temps réel** (WebSocket / Socket.IO) : plusieurs auditeurs sur
   un même projet voient les changements en direct (cases, vuln/non-vuln,
   variables, notes) et qui est en ligne / en train d'éditer quoi
-- **Profil personnalisable** (menu « Personnaliser ») : couleur et **photo de
-  profil** (JPEG/PNG uniquement, validée par magic bytes, ≤ 2 Mo, stockée en
-  base et servie en `nosniff` + CSP `sandbox`), reflétées dans la présence
+- **Profil personnalisable** (page `/profile`) : couleur et **photo de
+  profil** (JPEG/PNG uniquement, ≤ 2 Mo, ≤ 8192 px de côté). La structure
+  complète du fichier est vérifiée (chunks/CRC et flux de pixels PNG, segments
+  JPEG) et l'image est reconstruite sans métadonnées (EXIF/GPS, commentaires,
+  données après la fin du fichier) avant d'être stockée en base et servie en
+  `nosniff` + CSP `sandbox`. Reflétées dans la présence
+- **Aucun contenu applicatif avant authentification** : pages et scripts de
+  l'application (`frontend/private/`) ne sont servis qu'à une session valide
+  (`admin.js` / `/admin` aux seuls admins) ; seuls la page de connexion, la
+  réinitialisation de mot de passe et leurs ressources sont publiques
 - Référentiel de vulnérabilités basé sur l'**OWASP WSTG** (modifiable)
 - Espace **`/admin`** : gestion du référentiel (créer / modifier / supprimer),
   **import / export JSON** en masse, et gestion des **utilisateurs**
@@ -49,10 +56,14 @@ cheatsheet/
 │       ├── routes/             # auth, projects, admin
 │       └── data/wstgTemplate.js# checklist OWASP WSTG par défaut
 └── frontend/
-    ├── index.html          # app principale (projets + checklists)
-    ├── admin.html          # espace administration
-    ├── css/style.css
-    └── js/                 # api.js, app.js, admin.js
+    ├── public/             # servi à tous : connexion, reset, CSS, polices
+    │   ├── login.html, reset.html
+    │   └── js/             # base.js (fetch + CSRF, thème), login.js, reset.js
+    └── private/            # servi uniquement après authentification
+        ├── app.html        # app principale (projets + checklists)
+        ├── profile.html    # profil utilisateur
+        ├── admin.html      # espace administration (admins)
+        └── js/             # app.js, profile.js, profile-page.js, admin.js
 ```
 
 ## Démarrage rapide
@@ -63,6 +74,9 @@ Pré-requis : Docker + Docker Compose.
 cp .env.example .env
 # éditez .env : changez impérativement les mots de passe et JWT_SECRET
 #   openssl rand -hex 32   # pour générer un JWT_SECRET
+# JWT_SECRET est obligatoire (≥ 32 caractères) : l'application refuse de
+# démarrer en production avec une valeur courte ou celle de l'exemple.
+# Derrière un reverse proxy HTTPS : COOKIE_SECURE=true et TRUST_PROXY=1.
 
 docker compose up -d --build
 ```
