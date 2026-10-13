@@ -166,6 +166,12 @@ serveur, restaurez la base, puis `docker compose up -d --build`.
 ## Sécurité
 
 - Mots de passe hachés (bcrypt), jamais renvoyés par l'API.
+- SSO : un compte est lié à l'identité du fournisseur (émetteur + `sub`), qui
+  prime ensuite sur l'e-mail. La première liaison par e-mail exige un e-mail
+  **vérifié** par le fournisseur (option admin pour les fournisseurs qui ne
+  l'indiquent pas), n'est jamais faite automatiquement pour un compte admin
+  (lien depuis le profil, une fois connecté) et les comptes créés via SSO sont
+  toujours auditeurs.
 - Temps réel : l'accès au projet est vérifié à chaque `join` ; les connexions
   WebSocket d'un utilisateur sont fermées dès que ses sessions sont révoquées
   (déconnexion, changement/réinitialisation de mot de passe, changement de

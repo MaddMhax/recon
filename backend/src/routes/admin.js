@@ -269,6 +269,8 @@ router.patch('/users/:id', async (req, res) => {
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
 
   const update = {};
+  // Detach a wrongly linked SSO identity (the user can link again afterwards).
+  if (req.body.unlinkSso === true) update.ssoSubject = null;
   if (req.body.role) {
     const role = req.body.role === 'admin' ? 'admin' : 'auditor';
     // Guardrail: an admin cannot remove their own admin role (avoids lockout).
@@ -344,7 +346,7 @@ router.put('/sso', async (req, res) => {
   for (const k of strFields) if (b[k] !== undefined) update[k] = String(b[k]);
   if (b.enabled !== undefined) update.enabled = !!b.enabled;
   if (b.autoCreateUsers !== undefined) update.autoCreateUsers = !!b.autoCreateUsers;
-  if (b.defaultRole !== undefined) update.defaultRole = b.defaultRole === 'admin' ? 'admin' : 'auditor';
+  if (b.trustUnverifiedEmail !== undefined) update.trustUnverifiedEmail = !!b.trustUnverifiedEmail;
   if (typeof b.clientSecret === 'string' && b.clientSecret.length) update.clientSecret = b.clientSecret;
   await cfg.update(update);
   res.json({ sso: cfg });

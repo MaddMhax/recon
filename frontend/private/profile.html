@@ -66,6 +66,17 @@
           Ce compte est géré par votre fournisseur d'identité (SSO). Le mot de passe se modifie de son côté.
         </p>
       </div>
+
+      <!-- ============ Connexion SSO (liaison) — affiché si le SSO est actif ============ -->
+      <div class="panel hidden" id="ssoPanel">
+        <h2 style="margin-top:0">Connexion SSO</h2>
+        <p class="muted" id="ssoStatus"></p>
+        <div class="row">
+          <button id="ssoLinkBtn" type="button">Lier mon compte</button>
+          <button class="secondary" id="ssoUnlinkBtn" type="button">Délier</button>
+        </div>
+        <div class="error" id="ssoLinkError"></div>
+      </div>
     </div>
   </main>
 

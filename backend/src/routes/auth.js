@@ -277,14 +277,25 @@ router.get('/sso/status', async (_req, res) => {
   res.json({ enabled: cfg.isUsable(), provider: cfg.provider, label: cfg.label });
 });
 
-// GET /api/auth/sso/login  — start the flow: redirect to the provider.
-router.get('/sso/login', async (req, res) => {
-  const cfg = await getSsoConfig();
-  if (!cfg.isUsable()) return ssoFail(res, 'SSO non configuré');
+// Stable identifier of the configured identity provider, used to namespace
+// subjects: the authorization endpoint without query (it includes the realm or
+// tenant, e.g. Keycloak's /realms/<realm>/...). Changing provider therefore
+// never lets a subject from one IdP match an account linked with another.
+function ssoIssuerKey(cfg) {
+  const u = new URL(cfg.authorizationUrl);
+  u.search = '';
+  u.hash = '';
+  return u.toString();
+}
 
+// Build the provider redirect and set the matching state cookie. `link` holds
+// the id of a signed-in user linking their own account (profile page).
+function startSso(req, res, cfg, link) {
   // State doubles as a CSRF token: a short-lived signed JWT, mirrored in an
   // httpOnly cookie and checked on callback.
-  const state = jwt.sign({ n: crypto.randomBytes(16).toString('hex') }, process.env.JWT_SECRET, { expiresIn: '10m' });
+  const claims = { n: crypto.randomBytes(16).toString('hex') };
+  if (link) claims.link = link;
+  const state = jwt.sign(claims, process.env.JWT_SECRET, { algorithm: 'HS256', expiresIn: '10m' });
   res.cookie('sso_state', state, { httpOnly: true, sameSite: 'lax', secure: cookieSecure(), maxAge: 10 * 60 * 1000 });
 
   const params = new URLSearchParams({
@@ -294,12 +305,77 @@ router.get('/sso/login', async (req, res) => {
     scope: cfg.scopes || 'openid email profile',
     state,
   });
-  res.redirect(`${cfg.authorizationUrl}?${params.toString()}`);
+  return `${cfg.authorizationUrl}?${params.toString()}`;
+}
+
+// GET /api/auth/sso/login  — start the flow: redirect to the provider.
+router.get('/sso/login', async (req, res) => {
+  const cfg = await getSsoConfig();
+  if (!cfg.isUsable()) return ssoFail(res, 'SSO non configuré');
+  res.redirect(startSso(req, res, cfg, null));
 });
 
+// POST /api/auth/sso/link  — a signed-in user starts linking their account to
+// their SSO identity. CSRF-protected POST; answers the URL to navigate to.
+router.post('/sso/link', requireAuth, async (req, res) => {
+  const cfg = await getSsoConfig();
+  if (!cfg.isUsable()) return res.status(400).json({ error: 'SSO non configuré' });
+  res.json({ url: startSso(req, res, cfg, req.user.id) });
+});
+
+// POST /api/auth/sso/unlink  — detach the SSO identity from one's account.
+// Not offered to SSO-provisioned accounts: they have no usable password and
+// would be locked out.
+router.post('/sso/unlink', requireAuth, async (req, res) => {
+  const user = await User.findByPk(req.user.id);
+  if (!user) return res.status(401).json({ error: 'User no longer exists' });
+  if (user.ssoProvider) {
+    return res.status(400).json({ error: 'Ce compte a été créé via le SSO et ne peut pas en être délié' });
+  }
+  user.ssoSubject = null;
+  await user.save();
+  res.json({ user });
+});
+
+// Read the user's e-mail from the provider and whether the provider vouches
+// for it. Returns { email, verified }.
+async function ssoEmail(cfg, profile, headers) {
+  let email = profile[cfg.emailField || 'email'];
+  let verified = profile.email_verified === true || profile.email_verified === 'true';
+  // GitHub has no email_verified claim: its /user/emails list says which
+  // addresses are verified. Use the verified primary (or the profile's public
+  // address only if that one is verified).
+  if (cfg.provider === 'github') {
+    verified = false;
+    const emRes = await fetch('https://api.github.com/user/emails', { headers });
+    if (emRes.ok) {
+      const list = await emRes.json();
+      const ok = Array.isArray(list) ? list.filter((e) => e && e.verified && typeof e.email === 'string') : [];
+      const pick = (email && ok.find((e) => e.email.toLowerCase() === String(email).toLowerCase())) ||
+        ok.find((e) => e.primary) || ok[0];
+      if (pick) { email = pick.email; verified = true; }
+    }
+  }
+  if (!email || typeof email !== 'string') return { email: null, verified: false };
+  return { email: email.toLowerCase().trim(), verified };
+}
+
 // GET /api/auth/sso/callback  — provider redirects here with ?code&state.
+//
+// Account resolution, in order:
+//   1. an account already linked to this provider subject (issuer + `sub`);
+//   2. an existing account with the same e-mail — only if the provider has
+//      verified that e-mail, never for an admin account (admins link from
+//      their profile while signed in), and never if it is linked to another
+//      SSO identity; the subject is then recorded so later logins use (1);
+//   3. a new auditor account, when auto-provisioning is enabled.
 router.get('/sso/callback', async (req, res) => {
   const cfg = await getSsoConfig();
+  let linking = false;
+  // Failures while linking from the profile go back to the profile page.
+  const fail = (msg) => (linking
+    ? res.redirect('/profile?sso_error=' + encodeURIComponent(msg))
+    : ssoFail(res, msg));
   try {
     if (!cfg.isUsable()) return ssoFail(res, 'SSO non configuré');
 
@@ -307,7 +383,13 @@ router.get('/sso/callback', async (req, res) => {
     const cookieState = req.cookies && req.cookies.sso_state;
     res.clearCookie('sso_state');
     if (!code || !state || !cookieState || state !== cookieState) return ssoFail(res, 'État SSO invalide');
-    try { jwt.verify(String(state), process.env.JWT_SECRET, { algorithms: ['HS256'] }); } catch (_) { return ssoFail(res, 'État SSO expiré'); }
+    let statePayload;
+    try {
+      statePayload = jwt.verify(String(state), process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    } catch (_) {
+      return ssoFail(res, 'État SSO expiré');
+    }
+    linking = !!statePayload.link;
 
     // 1) Exchange the authorization code for an access token.
     const tokenRes = await fetch(cfg.tokenUrl, {
@@ -321,54 +403,72 @@ router.get('/sso/callback', async (req, res) => {
         client_secret: cfg.clientSecret || '',
       }),
     });
-    if (!tokenRes.ok) return ssoFail(res, "Échec de l'échange du code SSO");
+    if (!tokenRes.ok) return fail("Échec de l'échange du code SSO");
     const accessToken = (await tokenRes.json()).access_token;
-    if (!accessToken) return ssoFail(res, "Aucun jeton d'accès reçu");
+    if (!accessToken) return fail("Aucun jeton d'accès reçu");
 
-    // 2) Fetch the user profile.
+    // 2) Fetch the user profile and its stable subject identifier.
     const headers = { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'User-Agent': 'recon-sso' };
     const uiRes = await fetch(cfg.userinfoUrl, { headers });
-    if (!uiRes.ok) return ssoFail(res, 'Échec de récupération du profil SSO');
+    if (!uiRes.ok) return fail('Échec de récupération du profil SSO');
     const profile = await uiRes.json();
-
-    let email = profile[cfg.emailField || 'email'];
-    // GitHub does not return a private email on /user — fetch the primary one.
-    if (!email && cfg.provider === 'github') {
-      const emRes = await fetch('https://api.github.com/user/emails', { headers });
-      if (emRes.ok) {
-        const list = await emRes.json();
-        const pick = Array.isArray(list) && (list.find((e) => e.primary && e.verified) || list.find((e) => e.verified));
-        email = pick && pick.email;
-      }
+    const sub = profile.sub ?? profile.id ?? profile.oid; // OIDC / GitHub / Entra
+    if (sub === undefined || sub === null || String(sub) === '') {
+      return fail("Le fournisseur SSO n'a pas renvoyé d'identifiant (sub)");
     }
-    if (!email || typeof email !== 'string') return ssoFail(res, 'Aucune adresse e-mail fournie par le fournisseur SSO');
-    // Accounts are matched by email, so an address the provider has not verified
-    // could be used to take over an existing local account (e.g. an admin).
-    if (profile.email_verified === false || profile.email_verified === 'false') {
-      return ssoFail(res, "L'adresse e-mail n'est pas vérifiée auprès du fournisseur SSO");
-    }
-    email = String(email).toLowerCase().trim();
+    const subject = `${ssoIssuerKey(cfg)}|${String(sub)}`;
+    const linkedTo = await User.findOne({ where: { ssoSubject: subject } });
 
-    // 3) Resolve (or provision) the local account.
-    let user = await User.findOne({ where: { email } });
+    // Linking from the profile page: attach this identity to the signed-in user.
+    if (linking) {
+      const session = await resolveSession(req.cookies && req.cookies.token);
+      if (!session || session.id !== statePayload.link) return fail('Session expirée, reconnectez-vous puis réessayez');
+      if (linkedTo && linkedTo.id !== session.id) return fail('Cette identité SSO est déjà liée à un autre compte');
+      await User.update({ ssoSubject: subject }, { where: { id: session.id } });
+      return res.redirect('/profile?sso=linked');
+    }
+
+    let user = linkedTo;
     if (!user) {
-      if (!cfg.autoCreateUsers) {
-        return ssoFail(res, "Compte introuvable. Demandez à un administrateur de créer votre compte.");
+      const { email, verified } = await ssoEmail(cfg, profile, headers);
+      if (!email) return fail('Aucune adresse e-mail fournie par le fournisseur SSO');
+      // Accounts are matched by e-mail on first login, so an address the
+      // provider has not verified could take over an existing account.
+      if (!verified && !cfg.trustUnverifiedEmail) {
+        return fail("L'adresse e-mail n'est pas vérifiée par le fournisseur SSO");
       }
-      const randomPw = crypto.randomBytes(24).toString('hex');
-      user = await User.create({
-        email,
-        passwordHash: await User.hashPassword(randomPw),
-        role: cfg.defaultRole === 'admin' ? 'admin' : 'auditor',
-        ssoProvider: cfg.provider, // marks the account as SSO-provisioned
-      });
+
+      const existing = await User.findOne({ where: { email } });
+      if (existing) {
+        if (existing.ssoSubject) return fail('Ce compte est déjà lié à une autre identité SSO');
+        if (existing.role === 'admin') {
+          return fail('Compte administrateur : connectez-vous avec votre mot de passe, puis liez le SSO depuis votre profil');
+        }
+        existing.ssoSubject = subject;
+        await existing.save();
+        user = existing;
+      } else {
+        if (!cfg.autoCreateUsers) {
+          return fail('Compte introuvable. Demandez à un administrateur de créer votre compte.');
+        }
+        const randomPw = crypto.randomBytes(24).toString('hex');
+        user = await User.create({
+          email,
+          passwordHash: await User.hashPassword(randomPw),
+          // Never admin: privileges are granted by an administrator, not by
+          // whoever manages to sign in through the identity provider.
+          role: 'auditor',
+          ssoProvider: cfg.provider, // marks the account as SSO-provisioned
+          ssoSubject: subject,
+        });
+      }
     }
 
     setAuthCookie(res, signToken(user));
     return res.redirect('/');
   } catch (err) {
     console.error('[sso] callback error:', err);
-    return ssoFail(res, 'Erreur lors de la connexion SSO');
+    return fail('Erreur lors de la connexion SSO');
   }
 });
 

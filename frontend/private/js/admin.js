@@ -550,7 +550,8 @@ async function renderUsers() {
       <td>${esc(u.email)}${isSelf ? ' <span class="muted">(vous)</span>' : ''}</td>
       <td>${u.ssoProvider
         ? `<span class="badge tag-sso" title="Compte provisionné via SSO (${esc(u.ssoProvider)})">SSO</span>`
-        : '<span class="badge tag-local">Local</span>'}</td>
+        : '<span class="badge tag-local">Local</span>'}${u.ssoLinked && !u.ssoProvider
+        ? ' <span class="badge tag-sso" title="Identité SSO liée">+ SSO</span>' : ''}</td>
       <td>
         <select class="u-role" style="width:auto" ${isSelf ? 'disabled title="Vous ne pouvez pas changer votre propre rôle"' : ''}>
           <option value="auditor" ${u.role === 'auditor' ? 'selected' : ''}>Auditeur</option>
@@ -561,6 +562,7 @@ async function renderUsers() {
       <td>
         <div class="row" style="gap:8px">
           <button class="secondary small u-reset">Lien de réinit.</button>
+          ${u.ssoLinked && !u.ssoProvider ? '<button class="secondary small u-unlink" title="Détacher l\'identité SSO liée">Délier SSO</button>' : ''}
           <button class="danger small u-del" ${isSelf ? 'disabled' : ''}>Suppr.</button>
         </div>
       </td>
@@ -589,6 +591,14 @@ async function renderUsers() {
         alert(err.message);
       }
     });
+    const unlinkBtn = tr.querySelector('.u-unlink');
+    if (unlinkBtn) {
+      unlinkBtn.addEventListener('click', async () => {
+        if (!confirm("Détacher l'identité SSO de ce compte ?")) return;
+        try { await api.patch(`/api/admin/users/${id}`, { unlinkSso: true }); renderUsers(); }
+        catch (err) { alert(err.message); }
+      });
+    }
     const delBtn = tr.querySelector('.u-del');
     if (!delBtn.disabled) {
       delBtn.addEventListener('click', async () => {
@@ -723,12 +733,13 @@ async function renderSso() {
         <input type="checkbox" id="ssoAutoCreate" ${sso.autoCreateUsers ? 'checked' : ''} />
         <span>Créer automatiquement les comptes à la première connexion</span>
       </label>
-      <div style="margin-top:8px"><label>Rôle par défaut des comptes créés</label>
-        <select id="ssoDefaultRole" style="width:auto">
-          <option value="auditor" ${sso.defaultRole === 'auditor' ? 'selected' : ''}>Auditeur</option>
-          <option value="admin" ${sso.defaultRole === 'admin' ? 'selected' : ''}>Administrateur</option>
-        </select>
-      </div>
+      <p class="muted small" style="margin:4px 0 0">Les comptes créés via le SSO sont toujours <strong>auditeurs</strong> ; le rôle administrateur s'attribue ici, dans Utilisateurs.</p>
+
+      <label class="chk" style="margin-top:12px">
+        <input type="checkbox" id="ssoTrustEmail" ${sso.trustUnverifiedEmail ? 'checked' : ''} />
+        <span>Accepter les e-mails non vérifiés par le fournisseur</span>
+      </label>
+      <p class="muted small" style="margin:4px 0 0">À la première connexion SSO, un compte existant est retrouvé par son e-mail. Par défaut, seul un e-mail que le fournisseur déclare vérifié (<code>email_verified</code>) est accepté. N'activez cette option que si vous contrôlez les adresses chez le fournisseur (ex. Microsoft Entra mono-tenant, qui n'envoie pas <code>email_verified</code>). Les comptes administrateurs ne sont jamais liés automatiquement : ils lient le SSO depuis leur profil.</p>
 
       <div class="row" style="margin-top:14px; gap:8px">
         <button id="ssoSave">Enregistrer</button>
@@ -778,7 +789,7 @@ async function renderSso() {
         emailField: document.getElementById('ssoEmailField').value,
         nameField: document.getElementById('ssoNameField').value,
         autoCreateUsers: document.getElementById('ssoAutoCreate').checked,
-        defaultRole: document.getElementById('ssoDefaultRole').value,
+        trustUnverifiedEmail: document.getElementById('ssoTrustEmail').checked,
       });
       okEl.textContent = 'Configuration SSO enregistrée.';
       renderSso();

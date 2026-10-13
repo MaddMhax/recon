@@ -29,6 +29,47 @@ async function initProfilePage() {
 
   initAppearance();
   initPassword(sso);
+  initSsoLink();
+}
+
+// ---- Connexion SSO (liaison du compte) -----------------------------
+async function initSsoLink() {
+  const panel = document.getElementById('ssoPanel');
+  const errEl = document.getElementById('ssoLinkError');
+  // Outcome of a linking round-trip (?sso=linked / ?sso_error=...).
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('sso') === 'linked') toast('Compte lié au SSO');
+  if (params.get('sso_error')) errEl.textContent = params.get('sso_error');
+  if (params.has('sso') || params.has('sso_error')) window.history.replaceState({}, '', window.location.pathname);
+
+  let status = null;
+  try { status = await api.get('/api/auth/sso/status'); } catch (_) { /* SSO unavailable */ }
+  if (!status || !status.enabled) return;
+  panel.classList.remove('hidden');
+
+  const draw = () => {
+    document.getElementById('ssoStatus').textContent = ME.ssoLinked
+      ? `Votre compte est lié à votre identité ${status.label ? `(« ${status.label} »)` : 'SSO'}. Vous pouvez vous connecter par le SSO.`
+      : "Votre compte n'est pas lié au SSO. Liez-le pour pouvoir vous connecter avec votre fournisseur d'identité.";
+    document.getElementById('ssoLinkBtn').classList.toggle('hidden', !!ME.ssoLinked);
+    // SSO-provisioned accounts cannot unlink (they have no password).
+    document.getElementById('ssoUnlinkBtn').classList.toggle('hidden', !ME.ssoLinked || !!ME.ssoProvider);
+  };
+  draw();
+
+  document.getElementById('ssoLinkBtn').addEventListener('click', async () => {
+    errEl.textContent = '';
+    try {
+      const { url } = await api.post('/api/auth/sso/link');
+      window.location.assign(url);
+    } catch (err) { errEl.textContent = err.message; }
+  });
+  document.getElementById('ssoUnlinkBtn').addEventListener('click', async () => {
+    if (!confirm('Délier votre compte du SSO ? Vous vous connecterez par mot de passe.')) return;
+    errEl.textContent = '';
+    try { ME = (await api.post('/api/auth/sso/unlink')).user; draw(); }
+    catch (err) { errEl.textContent = err.message; }
+  });
 }
 
 // ---- Apparence ----------------------------------------------------

@@ -21,7 +21,7 @@ class SsoConfig extends Model {
       emailField: v.emailField,
       nameField: v.nameField,
       autoCreateUsers: v.autoCreateUsers,
-      defaultRole: v.defaultRole,
+      trustUnverifiedEmail: v.trustUnverifiedEmail,
       updatedAt: v.updatedAt,
     };
   }
@@ -49,9 +49,14 @@ SsoConfig.init(
     emailField: { type: DataTypes.STRING, allowNull: false, defaultValue: 'email' },
     nameField: { type: DataTypes.STRING, allowNull: false, defaultValue: 'name' },
     // Provision a new local account on first SSO login (otherwise the email must
-    // already exist). New accounts get `defaultRole`.
+    // already exist). New accounts are always auditors.
     autoCreateUsers: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    // Legacy column, no longer used (provisioned accounts are always auditors).
     defaultRole: { type: DataTypes.ENUM('admin', 'auditor'), allowNull: false, defaultValue: 'auditor' },
+    // Accept e-mails the provider does not mark as verified (e.g. Microsoft
+    // Entra sends no email_verified). Off by default: with it, whoever can set
+    // an address at the provider can claim the matching non-admin account.
+    trustUnverifiedEmail: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   },
   {
     sequelize,

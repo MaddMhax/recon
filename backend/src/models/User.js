@@ -24,6 +24,8 @@ class User extends Model {
       // Identity provider the account was created from (e.g. 'google'),
       // or null for a local (password) account.
       ssoProvider: v.ssoProvider || null,
+      // Whether an SSO identity is linked (the subject itself is not exposed).
+      ssoLinked: !!v.ssoSubject,
       createdAt: v.createdAt,
       updatedAt: v.updatedAt,
     };
@@ -63,6 +65,9 @@ User.init(
     // Set to the SSO provider key when the account was provisioned via SSO;
     // null for accounts created locally (with a password).
     ssoProvider: { type: DataTypes.STRING, allowNull: true, defaultValue: null },
+    // Linked SSO identity: "<issuer>|<sub>". Matched before the e-mail on
+    // every SSO login, so a changed or recycled address cannot switch accounts.
+    ssoSubject: { type: DataTypes.STRING(512), allowNull: true, defaultValue: null, unique: true },
     // Bumped whenever the password changes (self-service, reset link, or admin
     // reset). Embedded in the JWT as `tv` and checked on every request, so an
     // old token — i.e. a session opened before the change — stops being accepted.
