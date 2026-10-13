@@ -6,6 +6,13 @@ const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 router.use(requireAuth);
 
+// GET /api/users  — directory used to pick collaborators to invite onto a
+// project. Only the e-mail (the account identifier) is exposed.
+router.get('/', async (_req, res) => {
+  const users = await User.findAll({ attributes: ['id', 'email'], order: [['email', 'ASC']] });
+  res.json({ users: users.map((u) => ({ _id: u.id, email: u.email })) });
+});
+
 // GET /api/users/:id/avatar  — serve the stored avatar bytes safely.
 // The image is returned with a fixed image content-type, nosniff (set globally)
 // and a locked-down CSP/sandbox so it can never be interpreted as active

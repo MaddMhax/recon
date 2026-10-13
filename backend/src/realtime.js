@@ -2,6 +2,7 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const User = require('./models/User');
 const { isUuid } = require('./config/db');
+const { accessLevelById } = require('./lib/projectAccess');
 
 // Minimal cookie header parser (avoids pulling an extra dependency).
 function parseCookies(header = '') {
@@ -17,14 +18,18 @@ function parseCookies(header = '') {
 }
 
 const roomOf = (projectId) => `project:${projectId}`;
+// Every socket also sits in a per-user room, so a session revocation can reach
+// all of that user's open connections at once.
+const userRoom = (userId) => `user:${userId}`;
 
 // Profile bits shown in presence (color + avatar presence), without the bytes.
 const loadProfile = (id) =>
-  User.findByPk(id, { attributes: ['id', 'email', 'color', 'updatedAt', 'avatarType', 'tokenVersion'] });
+  User.findByPk(id, { attributes: ['id', 'email', 'role', 'color', 'updatedAt', 'avatarType', 'tokenVersion'] });
 
 const profileOf = (u) => ({
   id: u.id,
   email: u.email,
+  role: u.role, // server-side only (presence never sends it)
   color: u.color || null,
   hasAvatar: !!u.avatarType,
   avatarVersion: u.updatedAt ? new Date(u.updatedAt).getTime() : 0,
@@ -53,6 +58,16 @@ function emitPresence(io, room) {
   io.to(room).emit('presence', users);
 }
 
+// Take a socket out of its project room and refresh that room's presence.
+function leaveRoom(io, socket) {
+  const prev = socket.data.room;
+  if (!prev) return;
+  socket.leave(prev);
+  socket.data.room = null;
+  socket.data.focus = null;
+  emitPresence(io, prev);
+}
+
 // Attach Socket.IO to the HTTP server. Returns the io instance so REST routes
 // can broadcast data changes (see app.set('io', io)).
 function initRealtime(server) {
@@ -79,53 +94,80 @@ function initRealtime(server) {
       const u = await loadProfile(payload.id);
       if (!u || (u.tokenVersion || 0) !== (payload.tv || 0)) return next(new Error('unauthorized'));
       socket.data.user = profileOf(u);
+      socket.data.tv = payload.tv || 0;
+      socket.data.exp = payload.exp;
       next();
     } catch (_) {
       next(new Error('unauthorized'));
     }
   });
 
+  // Re-check that the session behind a socket is still valid (account exists,
+  // token version unchanged) and refresh its role/profile. Disconnects and
+  // returns false otherwise.
+  async function revalidate(socket) {
+    try {
+      const u = await loadProfile(socket.data.user.id);
+      if (u && (u.tokenVersion || 0) === socket.data.tv) {
+        socket.data.user = profileOf(u);
+        return true;
+      }
+    } catch (_) { /* treat as revoked */ }
+    socket.disconnect(true);
+    return false;
+  }
+
   io.on('connection', (socket) => {
-    let room = null;
+    socket.data.room = null;
+    socket.data.seq = 0;
+    socket.join(userRoom(socket.data.user.id));
 
-    socket.on('join', (projectId) => {
+    // The connection must not outlive the session token it was opened with.
+    const ttl = socket.data.exp ? socket.data.exp * 1000 - Date.now() : 0;
+    const expiry = ttl > 0 ? setTimeout(() => socket.disconnect(true), Math.min(ttl, 2 ** 31 - 1)) : null;
+
+    // Join a project room — only for the project's owner, its invited
+    // collaborators, or an admin (same rule as the REST API). The session is
+    // re-validated first, so a socket opened before a revocation cannot
+    // subscribe to anything new.
+    socket.on('join', async (projectId) => {
       if (!isUuid(projectId)) return;
-      if (room) { socket.leave(room); emitPresence(io, room); }
-      room = roomOf(projectId);
+      // Checks are async: only the latest join/leave may take effect.
+      const seq = ++socket.data.seq;
+      if (!(await revalidate(socket))) return;
+      let level = null;
+      try { level = await accessLevelById(socket.data.user, projectId); } catch (_) { /* deny */ }
+      if (seq !== socket.data.seq) return;
+      if (socket.data.room) leaveRoom(io, socket);
+      if (!level) {
+        socket.emit('project:revoked', { projectId: String(projectId) });
+        return;
+      }
+      socket.data.room = roomOf(projectId);
       socket.data.focus = null;
-      socket.join(room);
-      emitPresence(io, room);
+      socket.join(socket.data.room);
+      emitPresence(io, socket.data.room);
     });
 
-    socket.on('leave', () => {
-      if (!room) return;
-      const prev = room;
-      socket.leave(room);
-      socket.data.focus = null;
-      room = null;
-      emitPresence(io, prev);
-    });
+    socket.on('leave', () => { socket.data.seq += 1; leaveRoom(io, socket); });
 
     // What the user is currently editing, e.g. "item:<id>" or "variables".
     socket.on('focus', (field) => {
       socket.data.focus = typeof field === 'string' ? field.slice(0, 64) : null;
-      if (room) emitPresence(io, room);
+      if (socket.data.room) emitPresence(io, socket.data.room);
     });
 
     // The user changed their profile (color / avatar) — refresh presence live.
     // The new values are re-read from the database (already validated by
     // PATCH /api/auth/me), never taken from the client message.
     socket.on('profile', async () => {
-      try {
-        const u = await loadProfile(socket.data.user.id);
-        if (!u) return socket.disconnect(true);
-        socket.data.user = profileOf(u);
-        if (room) emitPresence(io, room);
-      } catch (_) { /* keep the previous profile */ }
+      if (!(await revalidate(socket))) return;
+      if (socket.data.room) emitPresence(io, socket.data.room);
     });
 
     socket.on('disconnect', () => {
-      if (room) emitPresence(io, room);
+      if (expiry) clearTimeout(expiry);
+      if (socket.data.room) emitPresence(io, socket.data.room);
     });
   });
 
@@ -139,4 +181,37 @@ function broadcast(app, projectId, event, payload, originSocketId) {
   io.to(roomOf(projectId)).emit(event, { projectId: String(projectId), ...payload, originSocketId: originSocketId || null });
 }
 
-module.exports = { initRealtime, broadcast };
+// Close every open connection of a user. Called whenever their sessions are
+// revoked (logout, password change/reset, role change, account deletion) so
+// the live feed stops at once instead of when the tab is closed. A client
+// whose cookie is still valid reconnects on its own.
+function disconnectUser(app, userId) {
+  const io = app.get('io');
+  if (io && userId) io.in(userRoom(userId)).disconnectSockets(true);
+}
+
+// Remove a user's sockets from one project room (access withdrawn) and tell
+// them, so their open view closes.
+function evictFromProject(app, projectId, userId) {
+  const io = app.get('io');
+  if (!io) return;
+  const room = roomOf(projectId);
+  for (const s of io.sockets.sockets.values()) {
+    if (s.data.user && s.data.user.id === userId && s.data.room === room) {
+      leaveRoom(io, s);
+      s.emit('project:revoked', { projectId: String(projectId) });
+    }
+  }
+}
+
+// Empty a project's room (project deleted).
+function closeProjectRoom(app, projectId) {
+  const io = app.get('io');
+  if (!io) return;
+  const room = roomOf(projectId);
+  for (const s of io.sockets.sockets.values()) {
+    if (s.data.room === room) { s.leave(room); s.data.room = null; s.data.focus = null; }
+  }
+}
+
+module.exports = { initRealtime, broadcast, disconnectUser, evictFromProject, closeProjectRoom };

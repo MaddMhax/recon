@@ -23,6 +23,11 @@ let pendingRedraw = false;     // a remote change arrived while we were typing
 // Checklist filter state for the open project (text + status + category). Reset
 // whenever a project is opened; applied by drawChecklist on every redraw.
 let checklistFilter = { text: '', status: 'all', category: 'all' };
+// Collaborators of the open project and the caller's access level on it
+// ('owner' | 'admin' | 'member').
+let projectAccess = null;
+let projectOwner = null;
+let projectMembers = [];
 
 // ---- Bootstrap : vérifie la session ----
 // The server only serves this page to a valid session; re-check it anyway (it
@@ -130,6 +135,10 @@ async function renderProjectList() {
       <textarea id="npScope" placeholder="https://app.exemple.com&#10;192.168.1.0/24"></textarea>
       <label>Notes</label>
       <textarea id="npNotes"></textarea>
+      <label>Collaborateurs</label>
+      <p class="muted small" style="margin:0 0 6px">Invitez des utilisateurs de l'application (par adresse e-mail) à travailler sur ce projet. Seuls vous et eux y auront accès.</p>
+      ${memberPickerHTML('np')}
+      <div class="member-list" id="npMembers"></div>
       <div class="row" style="margin-top:12px">
         <button id="npCreate">Créer le projet</button>
         <button class="secondary" id="npCancel">Annuler</button>
@@ -150,6 +159,7 @@ async function renderProjectList() {
           <div class="row">
             <h3>${esc(p.name)}</h3>
             <div class="spacer"></div>
+            ${p.access === 'member' ? '<span class="badge tag-shared" title="Projet partagé avec vous">Partagé</span>' : ''}
             <span class="badge status-${p.status === 'completed' ? 'pass' : 'in_progress'}">
               ${esc(PROJECT_STATUS_LABELS[p.status] || p.status)}
             </span>
@@ -165,6 +175,24 @@ async function renderProjectList() {
 
   // Form toggling
   const form = document.getElementById('newProjectForm');
+  // Invitees picked so far (user objects from the directory).
+  const invitees = [];
+  const drawInvitees = () => {
+    document.getElementById('npMembers').innerHTML = invitees.map((u) => memberRowHTML(u, { removable: true })).join('');
+  };
+  wireMemberPicker('np', async (user) => {
+    if (user._id === currentUser._id) throw new Error('Vous êtes déjà propriétaire du projet');
+    if (invitees.some((u) => u._id === user._id)) throw new Error('Déjà invité');
+    invitees.push(user);
+    drawInvitees();
+  });
+  document.getElementById('npMembers').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-remove]');
+    if (!btn) return;
+    const i = invitees.findIndex((u) => u._id === btn.dataset.remove);
+    if (i !== -1) invitees.splice(i, 1);
+    drawInvitees();
+  });
   document.getElementById('newProjectBtn').addEventListener('click', () => form.classList.toggle('hidden'));
   document.getElementById('npCancel').addEventListener('click', () => form.classList.add('hidden'));
   document.getElementById('npCreate').addEventListener('click', async () => {
@@ -176,6 +204,7 @@ async function renderProjectList() {
         referentialId: document.getElementById('npReferential').value,
         scope: document.getElementById('npScope').value,
         notes: document.getElementById('npNotes').value,
+        members: invitees.map((u) => u._id),
       });
       renderProjectList();
     } catch (err) {
@@ -191,8 +220,21 @@ async function renderProjectDetail(id, opts = {}) {
   currentProjectId = id;
   checklistFilter = { text: '', status: 'all', category: 'all' }; // fresh per project
   if (socket) socket.emit('join', id);
-  const { project, referentialName } = opts.preloaded || await api.get(`/api/projects/${id}`);
+  let data;
+  try {
+    data = opts.preloaded || await api.get(`/api/projects/${id}`);
+  } catch (err) {
+    // No access (never had it, removed, or project deleted): back to the list.
+    toast(err.message || 'Projet introuvable');
+    renderProjectList();
+    return;
+  }
+  const { project, referentialName } = data;
   currentProject = project;
+  projectAccess = data.access;
+  projectOwner = data.owner || null;
+  projectMembers = data.members || [];
+  const manage = projectAccess === 'owner' || projectAccess === 'admin';
 
   // Reflect the shareable deep link in the address bar. A normal click pushes a
   // new history entry; arriving via a link or the back button replaces in place.
@@ -209,14 +251,22 @@ async function renderProjectDetail(id, opts = {}) {
     <div class="row" style="margin-top:8px">
       <h1>${esc(project.name)}</h1>
       <div class="spacer"></div>
-      <button class="secondary small" id="shareProjectBtn">Partager</button>
+      <button class="secondary small" id="membersBtn">Collaborateurs (<span id="membersCount">${projectMembers.length + 1}</span>)</button>
+      <button class="secondary small" id="shareProjectBtn">Copier le lien</button>
       <button class="secondary small" id="editProjectBtn">Modifier</button>
       <button class="secondary small" id="resyncBtn">Synchroniser le référentiel</button>
-      <button class="danger small" id="deleteProjectBtn">Supprimer</button>
+      ${manage ? '<button class="danger small" id="deleteProjectBtn">Supprimer</button>' : ''}
     </div>
     <p class="subtitle">${esc(PROJECT_STATUS_LABELS[project.status] || project.status)}${referentialName ? ' · Référentiel : ' + esc(referentialName) : ''}</p>
 
     <div class="presence" id="presenceBar"></div>
+
+    <div id="membersPanel" class="panel hidden">
+      <h2 style="margin-top:0">Collaborateurs</h2>
+      <p class="muted small">Seuls le propriétaire et les collaborateurs invités ont accès à ce projet${manage ? '' : ' ; seul le propriétaire peut inviter ou retirer des collaborateurs'}.</p>
+      <div class="member-list" id="membersList"></div>
+      ${manage ? memberPickerHTML('pm') : '<div class="row" style="margin-top:8px"><button class="danger small" id="leaveProjectBtn">Quitter le projet</button></div>'}
+    </div>
 
     <div id="editProjectForm" class="panel hidden">
       <label>Nom</label>
@@ -264,11 +314,14 @@ async function renderProjectDetail(id, opts = {}) {
     if (!currentProject.shareSlug) { toast('Lien de partage indisponible'); return; }
     copyShareLink(window.location.origin + '/p/' + currentProject.shareSlug);
   });
-  document.getElementById('deleteProjectBtn').addEventListener('click', async () => {
-    if (!confirm('Supprimer définitivement ce projet ?')) return;
-    await api.del(`/api/projects/${id}`);
-    renderProjectList();
-  });
+  if (manage) {
+    document.getElementById('deleteProjectBtn').addEventListener('click', async () => {
+      if (!confirm('Supprimer définitivement ce projet ?')) return;
+      await api.del(`/api/projects/${id}`);
+      renderProjectList();
+    });
+  }
+  wireMembersPanel(id, manage);
   document.getElementById('resyncBtn').addEventListener('click', async () => {
     const r = await api.post(`/api/projects/${id}/resync`);
     toast(`${r.added} nouvel(le)(s) vérification(s) ajoutée(s)`);
@@ -290,6 +343,118 @@ async function renderProjectDetail(id, opts = {}) {
   });
 
   drawChecklist(id, project);
+}
+
+// ====================================================================
+// Collaborateurs (invitation par e-mail, parmi les utilisateurs de l'app)
+// ====================================================================
+
+let userDirectory = null; // [{ _id, email }], loaded on first use
+
+async function loadUserDirectory() {
+  if (!userDirectory) userDirectory = (await api.get('/api/users')).users || [];
+  return userDirectory;
+}
+
+// Input with autocompletion over the app's users + an "Inviter" button.
+function memberPickerHTML(prefix) {
+  return `
+    <div class="row">
+      <input id="${prefix}Invite" list="${prefix}Users" placeholder="adresse e-mail d'un utilisateur" autocomplete="off" style="flex:1;min-width:220px" />
+      <datalist id="${prefix}Users"></datalist>
+      <button class="secondary small" id="${prefix}InviteBtn" type="button">Inviter</button>
+    </div>
+    <div class="error" id="${prefix}InviteError"></div>`;
+}
+
+// Fill the picker's suggestions and call onPick(user) with the chosen
+// directory entry. onPick may throw to show an error under the field.
+function wireMemberPicker(prefix, onPick) {
+  const input = document.getElementById(prefix + 'Invite');
+  const errEl = document.getElementById(prefix + 'InviteError');
+  loadUserDirectory().then((users) => {
+    document.getElementById(prefix + 'Users').innerHTML =
+      users.map((u) => `<option value="${esc(u.email)}"></option>`).join('');
+  }).catch(() => { /* typing an exact e-mail still works server-side */ });
+  const submit = async () => {
+    errEl.textContent = '';
+    const q = input.value.trim().toLowerCase();
+    if (!q) return;
+    try {
+      const users = await loadUserDirectory();
+      // Exact e-mail, or an unambiguous user name (the part before the @).
+      let user = users.find((u) => u.email === q);
+      if (!user) {
+        const byName = users.filter((u) => shortName(u.email).toLowerCase() === q);
+        if (byName.length === 1) user = byName[0];
+      }
+      if (!user) throw new Error('Utilisateur introuvable');
+      await onPick(user);
+      input.value = '';
+    } catch (err) {
+      errEl.textContent = err.message;
+    }
+  };
+  document.getElementById(prefix + 'InviteBtn').addEventListener('click', submit);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+}
+
+function memberRowHTML(u, { tag = '', removable = false } = {}) {
+  return `
+    <div class="member-row">
+      ${chipHtml(u, 'pchip pchip-sm')}
+      <span>${esc(u.email)}</span>
+      ${tag ? `<span class="badge tag-local">${esc(tag)}</span>` : ''}
+      <div class="spacer"></div>
+      ${removable ? `<button class="secondary small" type="button" data-remove="${esc(u._id)}">Retirer</button>` : ''}
+    </div>`;
+}
+
+function renderMembersList(manage) {
+  const list = document.getElementById('membersList');
+  if (!list) return;
+  const rows = [];
+  if (projectOwner) rows.push(memberRowHTML(projectOwner, { tag: 'propriétaire' }));
+  else rows.push('<p class="muted small">Propriétaire : compte supprimé.</p>');
+  for (const m of projectMembers) {
+    rows.push(memberRowHTML(m, { tag: m._id === currentUser._id ? 'vous' : '', removable: manage }));
+  }
+  list.innerHTML = rows.join('');
+  const count = document.getElementById('membersCount');
+  if (count) count.textContent = String(projectMembers.length + (projectOwner ? 1 : 0));
+}
+
+function wireMembersPanel(id, manage) {
+  const panel = document.getElementById('membersPanel');
+  document.getElementById('membersBtn').addEventListener('click', () => panel.classList.toggle('hidden'));
+  renderMembersList(manage);
+  const apply = (data) => {
+    projectOwner = data.owner || null;
+    projectMembers = data.members || [];
+    renderMembersList(manage);
+  };
+  if (manage) {
+    wireMemberPicker('pm', async (user) => {
+      apply(await api.post(`/api/projects/${id}/members`, { user: user._id }));
+      toast(`${user.email} a maintenant accès au projet`);
+    });
+    document.getElementById('membersList').addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-remove]');
+      if (!btn) return;
+      const m = projectMembers.find((u) => u._id === btn.dataset.remove);
+      if (!m || !confirm(`Retirer l'accès de ${m.email} à ce projet ?`)) return;
+      try { apply(await api.del(`/api/projects/${id}/members/${encodeURIComponent(m._id)}`)); }
+      catch (err) { toast(err.message); }
+    });
+  } else {
+    document.getElementById('leaveProjectBtn').addEventListener('click', async () => {
+      if (!confirm('Quitter ce projet ? Vous perdrez son accès.')) return;
+      try {
+        await api.del(`/api/projects/${id}/members/${encodeURIComponent(currentUser._id)}`);
+        renderProjectList();
+      } catch (err) { toast(err.message); }
+    });
+  }
 }
 
 // Copy a project share link to the clipboard, falling back to a legacy
@@ -684,6 +849,32 @@ function connectRealtime() {
   socket.on('connect', () => {
     SOCKET_ID = socket.id;
     if (currentProjectId) socket.emit('join', currentProjectId);
+  });
+
+  // The server closes the connection when the session is revoked (logout,
+  // password change, role change...). Try once to reconnect: it succeeds if
+  // this browser holds a fresh cookie, otherwise the session is over.
+  socket.on('disconnect', (reason) => {
+    SOCKET_ID = null;
+    if (reason === 'io server disconnect') setTimeout(() => socket.connect(), 500);
+  });
+  socket.on('connect_error', (err) => {
+    if (err && err.message === 'unauthorized') redirectToLogin();
+  });
+
+  // Access to the open project was withdrawn (or never granted).
+  socket.on('project:revoked', (msg) => {
+    if (msg && msg.projectId === currentProjectId) {
+      toast("Votre accès à ce projet a été retiré");
+      renderProjectList();
+    }
+  });
+
+  socket.on('members:update', (msg) => {
+    if (!msg || msg.projectId !== currentProjectId) return;
+    projectOwner = msg.owner || null;
+    projectMembers = msg.members || [];
+    renderMembersList(projectAccess === 'owner' || projectAccess === 'admin');
   });
 
   socket.on('presence', (users) => {

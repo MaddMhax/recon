@@ -6,6 +6,12 @@ Direction artistique « terminal » (vert phosphore, thèmes clair/sombre).
 
 - Authentification (cookie de session signé JWT, mots de passe hachés bcrypt)
 - Gestion des audits **par projet**, chacun avec sa propre checklist
+- **Cloisonnement par projet** : un projet n'est visible que de son
+  propriétaire et des collaborateurs qu'il a invités (par e-mail, parmi les
+  utilisateurs de l'application) ; les admins voient tous les projets. Seul le
+  propriétaire (ou un admin) invite, retire et supprime ; un collaborateur
+  peut quitter le projet. Les autres utilisateurs reçoivent un 404, y compris
+  via le lien `/p/<slug>`
 - **Collaboration temps réel** (WebSocket / Socket.IO) : plusieurs auditeurs sur
   un même projet voient les changements en direct (cases, vuln/non-vuln,
   variables, notes) et qui est en ligne / en train d'éditer quoi
@@ -147,6 +153,9 @@ serveur, restaurez la base, puis `docker compose up -d --build`.
 | GET/PATCH/DELETE | `/api/projects/:id` | Détail / modifier / supprimer |
 | PATCH | `/api/projects/:id/checklist/:itemId` | Mettre à jour une vérification |
 | POST | `/api/projects/:id/resync` | Importer les nouveaux items du référentiel |
+| GET/POST | `/api/projects/:id/members` | Lister / inviter un collaborateur (propriétaire) |
+| DELETE | `/api/projects/:id/members/:userId` | Retirer un collaborateur / quitter le projet |
+| GET | `/api/users` | Annuaire (e-mails) pour inviter des collaborateurs |
 | GET/POST | `/api/admin/vulns` | Lister / créer une vulnérabilité (admin) |
 | PATCH/DELETE | `/api/admin/vulns/:id` | Modifier / supprimer (admin) |
 | GET | `/api/admin/vulns/export` | Export JSON (admin) |
@@ -157,6 +166,11 @@ serveur, restaurez la base, puis `docker compose up -d --build`.
 ## Sécurité
 
 - Mots de passe hachés (bcrypt), jamais renvoyés par l'API.
+- Temps réel : l'accès au projet est vérifié à chaque `join` ; les connexions
+  WebSocket d'un utilisateur sont fermées dès que ses sessions sont révoquées
+  (déconnexion, changement/réinitialisation de mot de passe, changement de
+  rôle, suppression du compte), à l'expiration du jeton, et il est retiré de
+  la room d'un projet dès que son accès lui est retiré.
 - Cookie de session `HttpOnly`, `SameSite=Lax`, `Secure` en production.
 - PostgreSQL non exposé sur l'hôte par défaut (réseau Docker interne).
 - En-têtes `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`.

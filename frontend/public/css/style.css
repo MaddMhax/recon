@@ -378,6 +378,9 @@ ol.sso-help code { word-break: break-all; }
 /* User account type tags (admin users table) */
 .badge.tag-sso { background: #16331f; color: var(--accent); }
 .badge.tag-local { background: #2a2f35; color: var(--muted); }
+.badge.tag-shared { background: #1c2c3a; color: var(--low); }
+.member-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.member-row { display: flex; align-items: center; gap: 8px; }
 
 /* Stats */
 .stats { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 16px; }

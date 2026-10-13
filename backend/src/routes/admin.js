@@ -8,6 +8,8 @@ const { getSsoConfig } = require('../models/SsoConfig');
 const { isUuid } = require('../config/db');
 const { requireAuth } = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/admin');
+const ProjectMember = require('../models/ProjectMember');
+const { disconnectUser } = require('../realtime');
 
 const router = express.Router();
 router.use(requireAuth, requireAdmin);
@@ -283,7 +285,11 @@ router.patch('/users/:id', async (req, res) => {
     // Force the target user's existing sessions to expire after a password reset.
     update.tokenVersion = (user.tokenVersion || 0) + 1;
   }
+  const roleChanged = update.role !== undefined && update.role !== user.role;
   await user.update(update);
+  // A new password revokes their sessions; a role change alters which projects
+  // they may follow. Either way, close their live connections.
+  if (update.passwordHash || roleChanged) disconnectUser(req.app, user.id);
   res.json({ user });
 });
 
@@ -311,7 +317,9 @@ router.delete('/users/:id', async (req, res) => {
   }
   const user = isUuid(req.params.id) ? await User.findByPk(req.params.id) : null;
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  await ProjectMember.destroy({ where: { userId: user.id } });
   await user.destroy();
+  disconnectUser(req.app, user.id);
   res.json({ ok: true });
 });
 

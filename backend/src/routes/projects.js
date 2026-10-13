@@ -3,10 +3,15 @@ const crypto = require('crypto');
 const Project = require('../models/Project');
 const VulnItem = require('../models/VulnItem');
 const Referential = require('../models/Referential');
+const User = require('../models/User');
+const ProjectMember = require('../models/ProjectMember');
 const { getDefaultReferential } = require('../models/Referential');
 const { isUuid } = require('../config/db');
 const { requireAuth } = require('../middleware/auth');
-const { broadcast } = require('../realtime');
+const { broadcast, evictFromProject, closeProjectRoom } = require('../realtime');
+const {
+  accessLevel, canManage, visibleProjectsWhere, loadProject, requireManage,
+} = require('../lib/projectAccess');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -53,9 +58,80 @@ async function uniqueShareSlug() {
   return Project.genShareSlug();
 }
 
-// GET /api/projects  — list (lightweight, with progress)
-router.get('/', async (_req, res) => {
-  const projects = await Project.findAll({ order: [['updatedAt', 'DESC']] });
+// Public shape of a user shown in a project's collaborator list.
+const memberView = (u) => ({
+  _id: u.id,
+  email: u.email,
+  color: u.color || null,
+  hasAvatar: !!u.avatarType,
+  updatedAt: u.updatedAt,
+});
+const MEMBER_ATTRS = ['id', 'email', 'color', 'avatarType', 'updatedAt'];
+
+// Owner + invited collaborators of a project.
+async function projectMembers(project) {
+  const rows = await ProjectMember.findAll({ where: { projectId: project.id }, order: [['createdAt', 'ASC']] });
+  const ids = [project.ownerId, ...rows.map((r) => r.userId)];
+  const users = await User.findAll({ where: { id: ids }, attributes: MEMBER_ATTRS });
+  const byId = new Map(users.map((u) => [u.id, u]));
+  const owner = byId.get(project.ownerId);
+  return {
+    owner: owner ? memberView(owner) : null, // null when the owner account was deleted
+    members: rows.map((r) => byId.get(r.userId)).filter(Boolean).map(memberView),
+  };
+}
+
+// Full detail payload (detail route, share link, after a membership change).
+async function detailPayload(project, access) {
+  const names = await referentialNameMap();
+  return {
+    project,
+    referentialName: names[project.referentialId] || null,
+    access,
+    ...(await projectMembers(project)),
+  };
+}
+
+// Resolve invitees given as user ids or e-mail addresses. Returns
+// { users } or { unknown: [identifier, ...] }.
+async function resolveInvitees(list) {
+  const users = [];
+  const unknown = [];
+  for (const raw of list) {
+    const ident = String(raw == null ? '' : raw).trim();
+    if (!ident) continue;
+    const user = isUuid(ident)
+      ? await User.findByPk(ident, { attributes: MEMBER_ATTRS })
+      : await User.findOne({ where: { email: ident.toLowerCase() }, attributes: MEMBER_ATTRS });
+    if (user) users.push(user);
+    else unknown.push(ident);
+  }
+  return unknown.length ? { unknown } : { users };
+}
+
+// Add collaborators (skipping the owner and existing members).
+async function addMembers(project, users, invitedById) {
+  for (const u of users) {
+    if (u.id === project.ownerId) continue;
+    await ProjectMember.findOrCreate({
+      where: { projectId: project.id, userId: u.id },
+      defaults: { invitedById },
+    });
+  }
+}
+
+// Push the new collaborator list to everyone on the project.
+async function broadcastMembers(req, project) {
+  broadcast(req.app, project.id, 'members:update', await projectMembers(project), req.get('x-socket-id'));
+}
+
+// GET /api/projects  — list (lightweight, with progress), limited to the
+// projects the caller owns or was invited to (admins see all).
+router.get('/', async (req, res) => {
+  const projects = await Project.findAll({
+    where: await visibleProjectsWhere(req.user),
+    order: [['updatedAt', 'DESC']],
+  });
   const names = await referentialNameMap();
   const summary = projects.map((p) => {
     const checklist = p.checklist || [];
@@ -68,6 +144,8 @@ router.get('/', async (_req, res) => {
       shareSlug: p.shareSlug,
       status: p.status,
       referential: names[p.referentialId] || null,
+      // Lets the list tell "my projects" from "shared with me".
+      access: p.ownerId === req.user.id ? 'owner' : (req.user.role === 'admin' ? 'admin' : 'member'),
       updatedAt: p.updatedAt,
       progress: { total, done, findings },
     };
@@ -87,6 +165,15 @@ router.post('/', async (req, res) => {
     const def = await getDefaultReferential();
     referentialId = def ? def.id : null;
   }
+  // Collaborators invited at creation (ids or e-mails). Resolved before the
+  // project exists so a typo does not leave a half-shared project behind.
+  let invitees = [];
+  if (req.body.members !== undefined) {
+    if (!Array.isArray(req.body.members)) return res.status(400).json({ error: 'Liste de collaborateurs invalide' });
+    const r = await resolveInvitees(req.body.members);
+    if (r.unknown) return res.status(400).json({ error: `Utilisateur introuvable : ${r.unknown.join(', ')}` });
+    invitees = r.users;
+  }
   const checklist = referentialId ? await buildChecklistFromCatalog(referentialId) : [];
   const project = await Project.create({
     name: name.trim(),
@@ -98,31 +185,33 @@ router.post('/', async (req, res) => {
     shareSlug: await uniqueShareSlug(),
     checklist,
   });
+  await addMembers(project, invitees, req.user.id);
   res.status(201).json({ project });
 });
 
 // GET /api/projects/by-slug/:slug  — resolve a share link to its project. Same
 // payload as the detail route so the frontend can open it in one round-trip.
 // Declared before "/:id" so the two-segment path is matched here, not there.
+// The link is only a convenience: it opens the project for its owner and
+// collaborators, and is a plain 404 for everyone else.
 router.get('/by-slug/:slug', async (req, res) => {
-  const project = await Project.findOne({ where: { shareSlug: req.params.slug } });
-  if (!project) return res.status(404).json({ error: 'Projet introuvable' });
-  const names = await referentialNameMap();
-  res.json({ project, referentialName: names[project.referentialId] || null });
+  const project = await Project.findOne({ where: { shareSlug: String(req.params.slug) } });
+  const access = await accessLevel(req.user, project);
+  if (!access) return res.status(404).json({ error: 'Projet introuvable' });
+  res.json(await detailPayload(project, access));
 });
+
+// Every /:id route below requires access to the project (else 404).
+router.use('/:id', loadProject);
 
 // GET /api/projects/:id  — full detail
 router.get('/:id', async (req, res) => {
-  const project = isUuid(req.params.id) ? await Project.findByPk(req.params.id) : null;
-  if (!project) return res.status(404).json({ error: 'Projet introuvable' });
-  const names = await referentialNameMap();
-  res.json({ project, referentialName: names[project.referentialId] || null });
+  res.json(await detailPayload(req.project, req.access));
 });
 
 // PATCH /api/projects/:id  — update project metadata
 router.patch('/:id', async (req, res) => {
-  const project = isUuid(req.params.id) ? await Project.findByPk(req.params.id) : null;
-  if (!project) return res.status(404).json({ error: 'Projet introuvable' });
+  const { project } = req;
 
   const allowed = ['name', 'scope', 'notes', 'status', 'variables'];
   const update = {};
@@ -148,19 +237,58 @@ router.patch('/:id', async (req, res) => {
   res.json({ project });
 });
 
-// DELETE /api/projects/:id
-router.delete('/:id', async (req, res) => {
-  const project = isUuid(req.params.id) ? await Project.findByPk(req.params.id) : null;
-  if (!project) return res.status(404).json({ error: 'Projet introuvable' });
+// DELETE /api/projects/:id  — owner (or admin) only
+router.delete('/:id', requireManage, async (req, res) => {
+  const { project } = req;
+  await ProjectMember.destroy({ where: { projectId: project.id } });
   await project.destroy();
   broadcast(req.app, project.id, 'project:deleted', {}, req.get('x-socket-id'));
+  closeProjectRoom(req.app, project.id);
   res.json({ ok: true });
+});
+
+/* ------------------------------------------------------------------ */
+/* Collaborators                                                       */
+/* ------------------------------------------------------------------ */
+
+// GET /api/projects/:id/members
+router.get('/:id/members', async (req, res) => {
+  res.json({ access: req.access, ...(await projectMembers(req.project)) });
+});
+
+// POST /api/projects/:id/members  { user: "<id or e-mail>" }  — owner/admin only
+router.post('/:id/members', requireManage, async (req, res) => {
+  const ident = req.body && (req.body.user ?? req.body.userId ?? req.body.email);
+  const r = await resolveInvitees([ident]);
+  if (r.unknown || !r.users.length) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  const [user] = r.users;
+  if (user.id === req.project.ownerId) return res.status(400).json({ error: 'Le propriétaire a déjà accès au projet' });
+  await addMembers(req.project, [user], req.user.id);
+  await broadcastMembers(req, req.project);
+  res.status(201).json(await projectMembers(req.project));
+});
+
+// DELETE /api/projects/:id/members/:userId  — the owner/admin removes a
+// collaborator, or a collaborator leaves the project.
+router.delete('/:id/members/:userId', async (req, res) => {
+  const { userId } = req.params;
+  const self = userId === req.user.id;
+  if (!self && !canManage(req.access)) {
+    return res.status(403).json({ error: 'Action réservée au propriétaire du projet' });
+  }
+  const removed = isUuid(userId)
+    ? await ProjectMember.destroy({ where: { projectId: req.project.id, userId } })
+    : 0;
+  if (!removed) return res.status(404).json({ error: "Ce collaborateur n'est pas membre du projet" });
+  // Cut the live feed immediately: their open sockets leave the project room.
+  evictFromProject(req.app, req.project.id, userId);
+  await broadcastMembers(req, req.project);
+  res.json(await projectMembers(req.project));
 });
 
 // PATCH /api/projects/:id/checklist/:itemId  — update a single check
 router.patch('/:id/checklist/:itemId', async (req, res) => {
-  const project = isUuid(req.params.id) ? await Project.findByPk(req.params.id) : null;
-  if (!project) return res.status(404).json({ error: 'Projet introuvable' });
+  const { project } = req;
 
   // Work on a copy of the JSONB array and reassign it so Sequelize detects the
   // change (in-place mutation of a JSONB value is not tracked).
@@ -186,8 +314,7 @@ router.patch('/:id/checklist/:itemId', async (req, res) => {
 
 // POST /api/projects/:id/resync  — pull any new catalog items into this project
 router.post('/:id/resync', async (req, res) => {
-  const project = isUuid(req.params.id) ? await Project.findByPk(req.params.id) : null;
-  if (!project) return res.status(404).json({ error: 'Projet introuvable' });
+  const { project } = req;
   // Dedupe by code when present, otherwise fall back to the name (codes are
   // optional, so empty codes must not collapse into a single entry).
   const key = (c) => (c.code ? `code:${c.code}` : `name:${c.name}`);

@@ -6,6 +6,7 @@ const User = require('../models/User');
 const { getSsoConfig } = require('../models/SsoConfig');
 const { requireAuth, resolveSession } = require('../middleware/auth');
 const { sanitizeImage } = require('../lib/image');
+const { disconnectUser } = require('../realtime');
 
 const router = express.Router();
 
@@ -127,7 +128,10 @@ router.post('/login', loginRateLimit, async (req, res) => {
 // account out on every device, since sessions are not tracked individually.
 router.post('/logout', async (req, res) => {
   const session = await resolveSession(req.cookies && req.cookies.token);
-  if (session) await User.increment('tokenVersion', { where: { id: session.id } });
+  if (session) {
+    await User.increment('tokenVersion', { where: { id: session.id } });
+    disconnectUser(req.app, session.id);
+  }
   res.clearCookie('token', { httpOnly: true, sameSite: 'lax', secure: cookieSecure() });
   res.json({ ok: true });
 });
@@ -221,6 +225,7 @@ router.post('/me/password', requireAuth, passwordChangeRateLimit, async (req, re
   user.resetTokenExpires = null;
   await user.save();
   pwAttempts.delete(req.user.id); // reset the counter on success
+  disconnectUser(req.app, user.id); // this tab reconnects with the new cookie
   setAuthCookie(res, signToken(user));
   res.json({ ok: true });
 });
@@ -250,6 +255,7 @@ router.post('/reset', async (req, res) => {
   user.resetTokenHash = null;
   user.resetTokenExpires = null;
   await user.save();
+  disconnectUser(req.app, user.id);
   res.json({ ok: true });
 });
 
