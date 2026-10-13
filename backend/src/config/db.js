@@ -42,6 +42,15 @@ async function connectDB() {
       // NULLs left on existing rows until seed.js backfills them.
       await sequelize.query('ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "shareSlug" VARCHAR(16)');
       await sequelize.query('CREATE UNIQUE INDEX IF NOT EXISTS "projects_shareSlug_uniq" ON "projects" ("shareSlug")');
+      // The audit journal is append-only: refuse UPDATE/DELETE at the database
+      // level too, so even a bug or a misused query cannot rewrite history.
+      await sequelize.query(`
+        CREATE OR REPLACE FUNCTION audit_log_immutable() RETURNS trigger AS $$
+        BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;
+        $$ LANGUAGE plpgsql`);
+      await sequelize.query('DROP TRIGGER IF EXISTS "audit_log_no_change" ON "audit_log"');
+      await sequelize.query(`CREATE TRIGGER "audit_log_no_change" BEFORE UPDATE OR DELETE ON "audit_log"
+        FOR EACH ROW EXECUTE FUNCTION audit_log_immutable()`);
       console.log('[db] connected to PostgreSQL');
       return;
     } catch (err) {

@@ -8,6 +8,7 @@ const { requireAuth, resolveSession } = require('../middleware/auth');
 const { sanitizeImage } = require('../lib/image');
 const { disconnectUser } = require('../realtime');
 const { safeRequest } = require('../lib/safeRequest');
+const { audit } = require('../lib/audit');
 
 const router = express.Router();
 
@@ -100,6 +101,11 @@ function loginRateLimit(req, res, next) {
   }
   if (e.count >= LOGIN_MAX) {
     const retry = Math.ceil((e.resetAt - now) / 1000);
+    // Log the first refusal of each window only (not every hammered request).
+    if (e.count === LOGIN_MAX) {
+      e.count += 1;
+      audit(req, 'auth.login.rate_limited', { details: { email: String((req.body && req.body.email) || '').slice(0, 254) } });
+    }
     res.setHeader('Retry-After', String(retry));
     return res.status(429).json({ error: `Trop de tentatives. Réessayez dans ${retry}s.` });
   }
@@ -116,9 +122,14 @@ router.post('/login', loginRateLimit, async (req, res) => {
   const user = await User.findOne({ where: { email: String(email).toLowerCase().trim() } });
   const ok = user ? await user.verifyPassword(String(password)) : await bcrypt.compare(String(password), DUMMY_HASH);
   if (!user || !ok) {
+    await audit(req, 'auth.login.failure', {
+      actor: user ? { id: user.id, email: user.email } : null,
+      details: { email: String(email).toLowerCase().trim().slice(0, 254), reason: user ? 'bad_password' : 'unknown_user' },
+    });
     return res.status(401).json({ error: 'Invalid credentials' });
   }
   loginAttempts.delete(req.ip); // reset the counter on success
+  await audit(req, 'auth.login.success', { actor: user, details: { method: 'password' } });
   setAuthCookie(res, signToken(user));
   res.json({ user });
 });
@@ -132,6 +143,7 @@ router.post('/logout', async (req, res) => {
   if (session) {
     await User.increment('tokenVersion', { where: { id: session.id } });
     disconnectUser(req.app, session.id);
+    await audit(req, 'auth.logout', { actor: session });
   }
   res.clearCookie('token', { httpOnly: true, sameSite: 'lax', secure: cookieSecure() });
   res.json({ ok: true });
@@ -212,6 +224,7 @@ router.post('/me/password', requireAuth, passwordChangeRateLimit, async (req, re
     return res.status(400).json({ error: 'Mot de passe actuel et nouveau mot de passe requis' });
   }
   if (!(await user.verifyPassword(String(currentPassword)))) {
+    await audit(req, 'auth.password.change_failure', { details: { reason: 'bad_current_password' } });
     return res.status(400).json({ error: 'Mot de passe actuel incorrect' });
   }
   if (String(newPassword).length < 8) {
@@ -227,6 +240,7 @@ router.post('/me/password', requireAuth, passwordChangeRateLimit, async (req, re
   await user.save();
   pwAttempts.delete(req.user.id); // reset the counter on success
   disconnectUser(req.app, user.id); // this tab reconnects with the new cookie
+  await audit(req, 'auth.password.change');
   setAuthCookie(res, signToken(user));
   res.json({ ok: true });
 });
@@ -257,6 +271,7 @@ router.post('/reset', async (req, res) => {
   user.resetTokenExpires = null;
   await user.save();
   disconnectUser(req.app, user.id);
+  await audit(req, 'auth.password.reset', { actor: user, target: ['user', user.id, user.email] });
   res.json({ ok: true });
 });
 
@@ -335,6 +350,7 @@ router.post('/sso/unlink', requireAuth, async (req, res) => {
   }
   user.ssoSubject = null;
   await user.save();
+  await audit(req, 'auth.sso.unlink');
   res.json({ user });
 });
 
@@ -373,17 +389,23 @@ async function ssoEmail(cfg, profile, headers) {
 router.get('/sso/callback', async (req, res) => {
   const cfg = await getSsoConfig();
   let linking = false;
+  let ssoEmailSeen = null; // for the audit trail of a failed attempt
   // Failures while linking from the profile go back to the profile page.
-  const fail = (msg) => (linking
-    ? res.redirect('/profile?sso_error=' + encodeURIComponent(msg))
-    : ssoFail(res, msg));
+  const fail = async (msg) => {
+    await audit(req, linking ? 'auth.sso.link_failure' : 'auth.sso.failure', {
+      details: { reason: msg, ...(ssoEmailSeen ? { email: ssoEmailSeen } : {}) },
+    });
+    return linking
+      ? res.redirect('/profile?sso_error=' + encodeURIComponent(msg))
+      : ssoFail(res, msg);
+  };
   try {
     if (!cfg.isUsable()) return ssoFail(res, 'SSO non configuré');
 
     const { code, state } = req.query;
     const cookieState = req.cookies && req.cookies.sso_state;
     res.clearCookie('sso_state');
-    if (!code || !state || !cookieState || state !== cookieState) return ssoFail(res, 'État SSO invalide');
+    if (!code || !state || !cookieState || state !== cookieState) return fail('État SSO invalide');
     let statePayload;
     try {
       statePayload = jwt.verify(String(state), process.env.JWT_SECRET, { algorithms: ['HS256'] });
@@ -428,12 +450,14 @@ router.get('/sso/callback', async (req, res) => {
       if (!session || session.id !== statePayload.link) return fail('Session expirée, reconnectez-vous puis réessayez');
       if (linkedTo && linkedTo.id !== session.id) return fail('Cette identité SSO est déjà liée à un autre compte');
       await User.update({ ssoSubject: subject }, { where: { id: session.id } });
+      await audit(req, 'auth.sso.link', { actor: session, details: { provider: cfg.provider } });
       return res.redirect('/profile?sso=linked');
     }
 
     let user = linkedTo;
     if (!user) {
       const { email, verified } = await ssoEmail(cfg, profile, headers);
+      ssoEmailSeen = email;
       if (!email) return fail('Aucune adresse e-mail fournie par le fournisseur SSO');
       // Accounts are matched by e-mail on first login, so an address the
       // provider has not verified could take over an existing account.
@@ -450,6 +474,7 @@ router.get('/sso/callback', async (req, res) => {
         existing.ssoSubject = subject;
         await existing.save();
         user = existing;
+        await audit(req, 'auth.sso.link', { actor: user, details: { provider: cfg.provider, by: 'verified_email', verified } });
       } else {
         if (!cfg.autoCreateUsers) {
           return fail('Compte introuvable. Demandez à un administrateur de créer votre compte.');
@@ -464,9 +489,11 @@ router.get('/sso/callback', async (req, res) => {
           ssoProvider: cfg.provider, // marks the account as SSO-provisioned
           ssoSubject: subject,
         });
+        await audit(req, 'user.create', { actor: user, target: ['user', user.id, user.email], details: { via: 'sso', provider: cfg.provider, role: 'auditor' } });
       }
     }
 
+    await audit(req, 'auth.login.success', { actor: user, details: { method: 'sso', provider: cfg.provider } });
     setAuthCookie(res, signToken(user));
     return res.redirect('/');
   } catch (err) {

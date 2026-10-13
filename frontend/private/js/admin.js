@@ -41,6 +41,7 @@ async function init() {
   renderImportExport();
   renderUsers();
   renderSso();
+  renderAudit();
 }
 
 document.getElementById('logoutBtn').addEventListener('click', async () => {
@@ -53,8 +54,9 @@ function setupTabs() {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tabs button').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      ['vulns', 'import', 'users', 'sso'].forEach((t) =>
+      ['vulns', 'import', 'users', 'sso', 'audit'].forEach((t) =>
         document.getElementById('tab-' + t).classList.toggle('hidden', t !== btn.dataset.tab));
+      if (btn.dataset.tab === 'audit') loadAudit(true); // always show fresh entries
     });
   });
 }
@@ -900,3 +902,120 @@ function openSsoHelpModal(provider, redirectUri) {
 }
 
 init();
+
+// ====================================================================
+// Journal d'audit (lecture seule)
+// ====================================================================
+
+const AUDIT_LABELS = {
+  'auth.login.success': 'Connexion',
+  'auth.login.failure': 'Échec de connexion',
+  'auth.login.rate_limited': 'Connexions bloquées (trop de tentatives)',
+  'auth.logout': 'Déconnexion',
+  'auth.password.change': 'Mot de passe modifié',
+  'auth.password.change_failure': 'Échec de changement de mot de passe',
+  'auth.password.reset': 'Mot de passe réinitialisé (lien)',
+  'auth.sso.failure': 'Échec de connexion SSO',
+  'auth.sso.link': 'SSO lié au compte',
+  'auth.sso.link_failure': 'Échec de liaison SSO',
+  'auth.sso.unlink': 'SSO délié',
+  'user.create': 'Utilisateur créé',
+  'user.delete': 'Utilisateur supprimé',
+  'user.role_change': 'Rôle modifié',
+  'user.password_set': 'Mot de passe défini par un admin',
+  'user.reset_link': 'Lien de réinitialisation généré',
+  'user.sso_unlink': 'SSO délié par un admin',
+  'sso.config_update': 'Configuration SSO modifiée',
+  'project.create': 'Projet créé',
+  'project.update': 'Projet modifié',
+  'project.delete': 'Projet supprimé',
+  'project.resync': 'Projet resynchronisé',
+  'project.member.add': 'Collaborateur ajouté',
+  'project.member.remove': 'Collaborateur retiré',
+  'project.member.leave': 'A quitté le projet',
+  'project.access_denied': 'Accès refusé à un projet',
+  'catalog.vuln.create': 'Vulnérabilité créée',
+  'catalog.vuln.update': 'Vulnérabilité modifiée',
+  'catalog.vuln.delete': 'Vulnérabilité supprimée',
+  'catalog.vuln.delete_all': 'Référentiel vidé',
+  'catalog.import': 'Import JSON',
+  'catalog.referential.create': 'Référentiel créé',
+  'catalog.referential.update': 'Référentiel modifié',
+  'catalog.referential.delete': 'Référentiel supprimé',
+};
+// Events shown in red: failures, denials and destructive actions.
+const AUDIT_ALERT = /failure|rate_limited|access_denied|delete|role_change|password_set/;
+
+let auditNext = null;
+
+function renderAudit() {
+  document.getElementById('tab-audit').innerHTML = `
+    <div class="panel">
+      <h2 style="margin-top:0">Journal d'audit</h2>
+      <p class="muted small">Connexions, gestion des comptes, partages et suppressions de projets, modifications du référentiel et du SSO. Le journal est en ajout seul : il ne peut être ni modifié ni effacé depuis l'application. Le contenu des projets (notes, périmètre…) n'y figure pas.</p>
+      <div class="filter-bar" style="padding:0;margin-bottom:10px">
+        <input id="auQ" class="flt-search" placeholder="Rechercher : e-mail, cible, IP" />
+        <select id="auAction">
+          <option value="">Tous les événements</option>
+          <option value="auth.">Authentification</option>
+          <option value="user.">Utilisateurs</option>
+          <option value="project.">Projets</option>
+          <option value="catalog.">Référentiel</option>
+          <option value="sso.">Configuration SSO</option>
+        </select>
+        <button class="secondary small" id="auRefresh" type="button">Actualiser</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Date</th><th>Utilisateur</th><th>Événement</th><th>Cible</th><th>Détails</th><th>IP</th></tr></thead>
+          <tbody id="auditRows"></tbody>
+        </table>
+      </div>
+      <div class="row" style="margin-top:10px"><button class="secondary small hidden" id="auMore" type="button">Plus ancien…</button></div>
+      <div class="error" id="auError"></div>
+    </div>`;
+  let t = null;
+  document.getElementById('auQ').addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => loadAudit(true), 300); });
+  document.getElementById('auAction').addEventListener('change', () => loadAudit(true));
+  document.getElementById('auRefresh').addEventListener('click', () => loadAudit(true));
+  document.getElementById('auMore').addEventListener('click', () => loadAudit(false));
+}
+
+// Compact, readable rendering of an entry's details object.
+function auditDetails(d) {
+  return Object.entries(d || {}).map(([k, v]) =>
+    `<span class="muted">${esc(k)}</span>=${esc(Array.isArray(v) ? v.join(', ') : (v && typeof v === 'object' ? JSON.stringify(v) : String(v)))}`)
+    .join(' · ');
+}
+
+async function loadAudit(reset) {
+  const rows = document.getElementById('auditRows');
+  if (!rows) return;
+  const errEl = document.getElementById('auError');
+  errEl.textContent = '';
+  if (reset) auditNext = null;
+  const qs = new URLSearchParams({ limit: '100' });
+  const q = document.getElementById('auQ').value.trim();
+  const action = document.getElementById('auAction').value;
+  if (q) qs.set('q', q);
+  if (action) qs.set('action', action);
+  if (!reset && auditNext) qs.set('before', String(auditNext));
+  try {
+    const { entries, next } = await api.get('/api/admin/audit?' + qs.toString());
+    const html = entries.map((e) => `
+      <tr>
+        <td class="muted small" style="white-space:nowrap">${esc(new Date(e.at).toLocaleString('fr-FR'))}</td>
+        <td>${esc(e.actorEmail || '—')}</td>
+        <td${AUDIT_ALERT.test(e.action) ? ' class="error"' : ''} title="${esc(e.action)}">${esc(AUDIT_LABELS[e.action] || e.action)}</td>
+        <td>${e.targetLabel || e.targetId ? `${esc(e.targetType || '')} <strong>${esc(e.targetLabel || e.targetId)}</strong>` : '—'}</td>
+        <td class="small">${auditDetails(e.details)}</td>
+        <td class="muted small">${esc(e.ip || '')}</td>
+      </tr>`).join('');
+    if (reset) rows.innerHTML = html || '<tr><td colspan="6" class="muted">Aucun événement.</td></tr>';
+    else rows.insertAdjacentHTML('beforeend', html);
+    auditNext = next;
+    document.getElementById('auMore').classList.toggle('hidden', !next);
+  } catch (err) {
+    errEl.textContent = err.message;
+  }
+}

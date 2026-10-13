@@ -156,6 +156,7 @@ serveur, restaurez la base, puis `docker compose up -d --build`.
 | GET/POST | `/api/projects/:id/members` | Lister / inviter un collaborateur (propriétaire) |
 | DELETE | `/api/projects/:id/members/:userId` | Retirer un collaborateur / quitter le projet |
 | GET | `/api/users` | Annuaire (e-mails) pour inviter des collaborateurs |
+| GET | `/api/admin/audit` | Journal d'audit (admin ; `q`, `action`, `before`, `limit`) |
 | GET/POST | `/api/admin/vulns` | Lister / créer une vulnérabilité (admin) |
 | PATCH/DELETE | `/api/admin/vulns/:id` | Modifier / supprimer (admin) |
 | GET | `/api/admin/vulns/export` | Export JSON (admin) |
@@ -176,6 +177,12 @@ serveur, restaurez la base, puis `docker compose up -d --build`.
   pointer vers une adresse publique (vérifiée à la connexion, sans suivre de
   redirection). Un fournisseur sur réseau privé s'autorise explicitement via
   `SSO_ALLOWED_HOSTS`.
+- **Journal d'audit** (onglet *Journal* de `/admin`) : connexions et échecs,
+  blocages anti-bruteforce, comptes (création, rôle, mot de passe, liens de
+  réinitialisation, suppression), SSO, projets (création, modification,
+  partage, suppression, accès refusés) et référentiel. En ajout seul (un
+  trigger PostgreSQL refuse UPDATE/DELETE) ; ni secret, ni mot de passe, ni
+  contenu de projet n'y est écrit.
 - Temps réel : l'accès au projet est vérifié à chaque `join` ; les connexions
   WebSocket d'un utilisateur sont fermées dès que ses sessions sont révoquées
   (déconnexion, changement/réinitialisation de mot de passe, changement de

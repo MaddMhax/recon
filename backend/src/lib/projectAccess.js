@@ -2,6 +2,7 @@ const { Op } = require('sequelize');
 const Project = require('../models/Project');
 const ProjectMember = require('../models/ProjectMember');
 const { isUuid } = require('../config/db');
+const { audit } = require('./audit');
 
 // Project access model:
 //   - owner   : the creator (Project.ownerId) — full control, invites/removes
@@ -47,7 +48,12 @@ async function visibleProjectsWhere(user) {
 async function loadProject(req, res, next) {
   const project = isUuid(req.params.id) ? await Project.findByPk(req.params.id) : null;
   const level = await accessLevel(req.user, project);
-  if (!level) return res.status(404).json({ error: 'Projet introuvable' });
+  if (!level) {
+    // An existing project the caller may not see: worth a trace (probing or
+    // a stale link). Unknown ids are just 404s.
+    if (project) await audit(req, 'project.access_denied', { target: ['project', project.id, project.name], details: { method: req.method } });
+    return res.status(404).json({ error: 'Projet introuvable' });
+  }
   req.project = project;
   req.access = level;
   return next();

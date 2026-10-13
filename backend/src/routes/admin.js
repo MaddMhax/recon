@@ -11,6 +11,9 @@ const { requireAdmin } = require('../middleware/admin');
 const ProjectMember = require('../models/ProjectMember');
 const { disconnectUser } = require('../realtime');
 const { safeRequest, urlProblem, SafeRequestError } = require('../lib/safeRequest');
+const { audit } = require('../lib/audit');
+const AuditLog = require('../models/AuditLog');
+const { Op } = require('sequelize');
 
 const router = express.Router();
 router.use(requireAuth, requireAdmin);
@@ -58,6 +61,7 @@ router.post('/vulns', async (req, res) => {
     notes: req.body.notes || '',
     order: req.body.order || 0,
   });
+  await audit(req, 'catalog.vuln.create', { target: ['vuln', vuln.id, vuln.code || vuln.name], details: { referentialId } });
   res.status(201).json({ vuln });
 });
 
@@ -84,6 +88,7 @@ router.patch('/vulns/:id', async (req, res) => {
   const update = {};
   for (const k of allowed) if (req.body[k] !== undefined) update[k] = req.body[k];
   await vuln.update(update);
+  await audit(req, 'catalog.vuln.update', { target: ['vuln', vuln.id, vuln.code || vuln.name], details: { fields: Object.keys(update) } });
   res.json({ vuln });
 });
 
@@ -92,6 +97,7 @@ router.patch('/vulns/:id', async (req, res) => {
 router.delete('/vulns', async (req, res) => {
   const referentialId = await resolveReferentialId(req);
   const deleted = await VulnItem.destroy({ where: { referentialId } });
+  await audit(req, 'catalog.vuln.delete_all', { target: ['referential', referentialId], details: { deleted } });
   res.json({ deleted });
 });
 
@@ -100,6 +106,7 @@ router.delete('/vulns/:id', async (req, res) => {
   const vuln = isUuid(req.params.id) ? await VulnItem.findByPk(req.params.id) : null;
   if (!vuln) return res.status(404).json({ error: 'Vulnérabilité introuvable' });
   await vuln.destroy();
+  await audit(req, 'catalog.vuln.delete', { target: ['vuln', vuln.id, vuln.code || vuln.name] });
   res.json({ ok: true });
 });
 
@@ -172,6 +179,7 @@ router.post('/vulns/import', async (req, res) => {
       created += 1;
     }
   }
+  await audit(req, 'catalog.import', { target: ['referential', referentialId], details: { mode, created, updated, errors: errors.length } });
   res.json({ mode, created, updated, errors });
 });
 
@@ -194,6 +202,7 @@ router.post('/referentials', async (req, res) => {
   }
   const max = await Referential.max('order');
   const referential = await Referential.create({ name, order: (Number.isFinite(max) ? max : -1) + 1 });
+  await audit(req, 'catalog.referential.create', { target: ['referential', referential.id, name] });
   res.status(201).json({ referential });
 });
 
@@ -212,7 +221,9 @@ router.patch('/referentials/:id', async (req, res) => {
     await Referential.update({ isDefault: false }, { where: {} });
     ref.isDefault = true;
   }
+  const changed = ref.changed() || [];
   await ref.save();
+  if (changed.length) await audit(req, 'catalog.referential.update', { target: ['referential', ref.id, ref.name], details: { fields: changed } });
   res.json({ referential: ref });
 });
 
@@ -231,6 +242,7 @@ router.delete('/referentials/:id', async (req, res) => {
     const next = await Referential.findOne({ order: [['order', 'ASC'], ['name', 'ASC']] });
     if (next) { next.isDefault = true; await next.save(); }
   }
+  await audit(req, 'catalog.referential.delete', { target: ['referential', ref.id, ref.name] });
   res.json({ ok: true });
 });
 
@@ -261,6 +273,7 @@ router.post('/users', async (req, res) => {
     passwordHash: await User.hashPassword(String(password)),
     role: role === 'admin' ? 'admin' : 'auditor',
   });
+  await audit(req, 'user.create', { target: ['user', user.id, user.email], details: { via: 'admin', role: user.role } });
   res.status(201).json({ user });
 });
 
@@ -289,7 +302,13 @@ router.patch('/users/:id', async (req, res) => {
     update.tokenVersion = (user.tokenVersion || 0) + 1;
   }
   const roleChanged = update.role !== undefined && update.role !== user.role;
+  const previousRole = user.role;
+  const unlinked = update.ssoSubject === null && !!user.ssoSubject;
   await user.update(update);
+  const target = ['user', user.id, user.email];
+  if (roleChanged) await audit(req, 'user.role_change', { target, details: { from: previousRole, to: update.role } });
+  if (update.passwordHash) await audit(req, 'user.password_set', { target });
+  if (unlinked) await audit(req, 'user.sso_unlink', { target });
   // A new password revokes their sessions; a role change alters which projects
   // they may follow. Either way, close their live connections.
   if (update.passwordHash || roleChanged) disconnectUser(req.app, user.id);
@@ -307,6 +326,7 @@ router.post('/users/:id/reset-link', async (req, res) => {
   user.resetTokenHash = crypto.createHash('sha256').update(token).digest('hex');
   user.resetTokenExpires = new Date(Date.now() + RESET_TOKEN_TTL_MS);
   await user.save();
+  await audit(req, 'user.reset_link', { target: ['user', user.id, user.email], details: { expiresAt: user.resetTokenExpires } });
 
   const base = `${req.protocol}://${req.get('host')}`;
   const url = `${base}/reset?token=${token}`;
@@ -323,6 +343,7 @@ router.delete('/users/:id', async (req, res) => {
   await ProjectMember.destroy({ where: { userId: user.id } });
   await user.destroy();
   disconnectUser(req.app, user.id);
+  await audit(req, 'user.delete', { target: ['user', user.id, user.email], details: { role: user.role } });
   res.json({ ok: true });
 });
 
@@ -355,7 +376,14 @@ router.put('/sso', async (req, res) => {
   if (b.autoCreateUsers !== undefined) update.autoCreateUsers = !!b.autoCreateUsers;
   if (b.trustUnverifiedEmail !== undefined) update.trustUnverifiedEmail = !!b.trustUnverifiedEmail;
   if (typeof b.clientSecret === 'string' && b.clientSecret.length) update.clientSecret = b.clientSecret;
+  // Record which settings changed (values only for non-secret switches; the
+  // client secret is reported as changed, never logged).
+  const changed = Object.keys(update).filter((k) => String(cfg[k]) !== String(update[k]));
   await cfg.update(update);
+  if (changed.length) {
+    const switches = Object.fromEntries(changed.filter((k) => typeof update[k] === 'boolean').map((k) => [k, update[k]]));
+    await audit(req, 'sso.config_update', { target: ['sso', cfg.id], details: { fields: changed, ...switches } });
+  }
   res.json({ sso: cfg });
 });
 
@@ -447,6 +475,29 @@ router.post('/sso/test', async (req, res) => {
   }
 
   res.json({ checks, ok: checks.every((c) => c.ok) });
+});
+
+/* ------------------------------------------------------------------ */
+/* Audit journal (read-only)                                           */
+/* ------------------------------------------------------------------ */
+
+// GET /api/admin/audit?q=&action=&before=<id>&limit=
+// Newest first; `before` pages backwards. `q` matches the actor e-mail, the
+// target label or the IP; `action` is a prefix (e.g. "auth.", "project.").
+router.get('/audit', async (req, res) => {
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
+  const where = {};
+  const before = parseInt(req.query.before, 10);
+  if (Number.isSafeInteger(before) && before > 0) where.id = { [Op.lt]: before };
+  const action = typeof req.query.action === 'string' ? req.query.action.trim() : '';
+  if (action) where.action = { [Op.startsWith]: action };
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (q) {
+    const like = { [Op.iLike]: `%${q.replace(/[\\%_]/g, (c) => '\\' + c)}%` };
+    where[Op.or] = [{ actorEmail: like }, { targetLabel: like }, { ip: like }];
+  }
+  const entries = await AuditLog.findAll({ where, order: [['id', 'DESC']], limit });
+  res.json({ entries, next: entries.length === limit ? entries[entries.length - 1].id : null });
 });
 
 module.exports = router;

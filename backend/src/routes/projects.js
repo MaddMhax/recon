@@ -12,6 +12,7 @@ const { broadcast, evictFromProject, closeProjectRoom } = require('../realtime')
 const {
   accessLevel, canManage, visibleProjectsWhere, loadProject, requireManage,
 } = require('../lib/projectAccess');
+const { audit } = require('../lib/audit');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -186,6 +187,10 @@ router.post('/', async (req, res) => {
     checklist,
   });
   await addMembers(project, invitees, req.user.id);
+  await audit(req, 'project.create', {
+    target: ['project', project.id, project.name],
+    details: { members: invitees.filter((u) => u.id !== req.user.id).map((u) => u.email) },
+  });
   res.status(201).json({ project });
 });
 
@@ -197,7 +202,10 @@ router.post('/', async (req, res) => {
 router.get('/by-slug/:slug', async (req, res) => {
   const project = await Project.findOne({ where: { shareSlug: String(req.params.slug) } });
   const access = await accessLevel(req.user, project);
-  if (!access) return res.status(404).json({ error: 'Projet introuvable' });
+  if (!access) {
+    if (project) await audit(req, 'project.access_denied', { target: ['project', project.id, project.name], details: { via: 'share_link' } });
+    return res.status(404).json({ error: 'Projet introuvable' });
+  }
   res.json(await detailPayload(project, access));
 });
 
@@ -233,6 +241,8 @@ router.patch('/:id', async (req, res) => {
     }
   }
   await project.update(update);
+  // Field names only: project content (scope, notes...) stays out of the log.
+  await audit(req, 'project.update', { target: ['project', project.id, project.name], details: { fields: Object.keys(update) } });
   broadcast(req.app, project.id, 'project:update', { fields: update }, req.get('x-socket-id'));
   res.json({ project });
 });
@@ -242,6 +252,7 @@ router.delete('/:id', requireManage, async (req, res) => {
   const { project } = req;
   await ProjectMember.destroy({ where: { projectId: project.id } });
   await project.destroy();
+  await audit(req, 'project.delete', { target: ['project', project.id, project.name] });
   broadcast(req.app, project.id, 'project:deleted', {}, req.get('x-socket-id'));
   closeProjectRoom(req.app, project.id);
   res.json({ ok: true });
@@ -264,6 +275,7 @@ router.post('/:id/members', requireManage, async (req, res) => {
   const [user] = r.users;
   if (user.id === req.project.ownerId) return res.status(400).json({ error: 'Le propriétaire a déjà accès au projet' });
   await addMembers(req.project, [user], req.user.id);
+  await audit(req, 'project.member.add', { target: ['project', req.project.id, req.project.name], details: { member: user.email } });
   await broadcastMembers(req, req.project);
   res.status(201).json(await projectMembers(req.project));
 });
@@ -282,6 +294,11 @@ router.delete('/:id/members/:userId', async (req, res) => {
   if (!removed) return res.status(404).json({ error: "Ce collaborateur n'est pas membre du projet" });
   // Cut the live feed immediately: their open sockets leave the project room.
   evictFromProject(req.app, req.project.id, userId);
+  const gone = self ? null : await User.findByPk(userId, { attributes: ['email'] });
+  await audit(req, self ? 'project.member.leave' : 'project.member.remove', {
+    target: ['project', req.project.id, req.project.name],
+    details: self ? {} : { member: gone ? gone.email : userId },
+  });
   await broadcastMembers(req, req.project);
   res.json(await projectMembers(req.project));
 });
@@ -353,6 +370,7 @@ router.post('/:id/resync', async (req, res) => {
     return added.length;
   });
   if (!out) return res.status(404).json({ error: 'Projet introuvable' });
+  if (out.result) await audit(req, 'project.resync', { target: ['project', req.project.id, req.project.name], details: { added: out.result } });
   // Tell collaborators to reload the project (checklist length changed).
   if (out.result) broadcast(req.app, req.project.id, 'project:reload', {}, req.get('x-socket-id'));
   res.json({ added: out.result, project: out.project });
