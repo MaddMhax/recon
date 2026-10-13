@@ -6,7 +6,7 @@ const Referential = require('../models/Referential');
 const User = require('../models/User');
 const ProjectMember = require('../models/ProjectMember');
 const { getDefaultReferential } = require('../models/Referential');
-const { isUuid } = require('../config/db');
+const { isUuid, sequelize } = require('../config/db');
 const { requireAuth } = require('../middleware/auth');
 const { broadcast, evictFromProject, closeProjectRoom } = require('../realtime');
 const {
@@ -286,55 +286,76 @@ router.delete('/:id/members/:userId', async (req, res) => {
   res.json(await projectMembers(req.project));
 });
 
+// The checklist is one JSONB array, so every change is a read-modify-write of
+// the whole array. Run it on a freshly read, row-locked copy inside a
+// transaction: concurrent writers (several auditors on one project) then queue
+// up instead of overwriting each other's changes. `fn(project)` mutates and
+// returns a result; the project is saved before the lock is released. Resolves
+// to null if the project vanished in the meantime.
+function withLockedProject(id, fn) {
+  return sequelize.transaction(async (transaction) => {
+    const project = await Project.findByPk(id, { transaction, lock: transaction.LOCK.UPDATE });
+    if (!project) return null;
+    const result = await fn(project);
+    await project.save({ transaction });
+    return { project, result };
+  });
+}
+
 // PATCH /api/projects/:id/checklist/:itemId  — update a single check
 router.patch('/:id/checklist/:itemId', async (req, res) => {
-  const { project } = req;
+  const out = await withLockedProject(req.project.id, (project) => {
+    // Work on a copy of the JSONB array and reassign it so Sequelize detects
+    // the change (in-place mutation of a JSONB value is not tracked).
+    const checklist = (project.checklist || []).map((c) => ({ ...c }));
+    const item = checklist.find((c) => c._id === req.params.itemId);
+    if (!item) return null;
 
-  // Work on a copy of the JSONB array and reassign it so Sequelize detects the
-  // change (in-place mutation of a JSONB value is not tracked).
-  const checklist = (project.checklist || []).map((c) => ({ ...c }));
-  const item = checklist.find((c) => c._id === req.params.itemId);
-  if (!item) return res.status(404).json({ error: 'Élément introuvable' });
+    const allowed = ['verified', 'vulnerable', 'command', 'notes'];
+    for (const k of allowed) {
+      if (req.body[k] === undefined) continue;
+      if (k === 'verified') item.verified = !!req.body[k];
+      else if (k === 'vulnerable') item.vulnerable = req.body[k] === null ? null : !!req.body[k];
+      else item[k] = str(req.body[k]);
+    }
+    // While unverified, the vulnerability decision is reset to "not decided".
+    if (item.verified === false) item.vulnerable = null;
 
-  const allowed = ['verified', 'vulnerable', 'command', 'notes'];
-  for (const k of allowed) {
-    if (req.body[k] === undefined) continue;
-    if (k === 'verified') item.verified = !!req.body[k];
-    else if (k === 'vulnerable') item.vulnerable = req.body[k] === null ? null : !!req.body[k];
-    else item[k] = str(req.body[k]);
-  }
-  // While unverified, the vulnerability decision is reset to "not decided".
-  if (item.verified === false) item.vulnerable = null;
-
-  project.checklist = checklist;
-  await project.save();
-  broadcast(req.app, project.id, 'item:update', { item }, req.get('x-socket-id'));
+    project.checklist = checklist;
+    return item;
+  });
+  if (!out) return res.status(404).json({ error: 'Projet introuvable' });
+  if (!out.result) return res.status(404).json({ error: 'Élément introuvable' });
+  const item = out.result;
+  broadcast(req.app, req.project.id, 'item:update', { item }, req.get('x-socket-id'));
   res.json({ item });
 });
 
 // POST /api/projects/:id/resync  — pull any new catalog items into this project
 router.post('/:id/resync', async (req, res) => {
-  const { project } = req;
   // Dedupe by code when present, otherwise fall back to the name (codes are
   // optional, so empty codes must not collapse into a single entry).
   const key = (c) => (c.code ? `code:${c.code}` : `name:${c.name}`);
-  const checklist = (project.checklist || []).map((c) => ({ ...c }));
-  const existing = new Set(checklist.map(key));
   // Resync from the project's own referential (fall back to the default one for
   // projects created before referentials existed).
-  let referentialId = project.referentialId;
+  let referentialId = req.project.referentialId;
   if (!referentialId) {
     const def = await getDefaultReferential();
     referentialId = def ? def.id : null;
   }
   const catalog = referentialId ? await buildChecklistFromCatalog(referentialId) : [];
-  const added = catalog.filter((c) => !existing.has(key(c)));
 
-  project.checklist = checklist.concat(added);
-  await project.save();
+  const out = await withLockedProject(req.project.id, (project) => {
+    const checklist = project.checklist || [];
+    const existing = new Set(checklist.map(key));
+    const added = catalog.filter((c) => !existing.has(key(c)));
+    if (added.length) project.checklist = checklist.concat(added);
+    return added.length;
+  });
+  if (!out) return res.status(404).json({ error: 'Projet introuvable' });
   // Tell collaborators to reload the project (checklist length changed).
-  if (added.length) broadcast(req.app, project.id, 'project:reload', {}, req.get('x-socket-id'));
-  res.json({ added: added.length, project });
+  if (out.result) broadcast(req.app, req.project.id, 'project:reload', {}, req.get('x-socket-id'));
+  res.json({ added: out.result, project: out.project });
 });
 
 module.exports = router;
