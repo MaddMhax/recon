@@ -10,6 +10,7 @@ const { requireAuth } = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/admin');
 const ProjectMember = require('../models/ProjectMember');
 const { disconnectUser } = require('../realtime');
+const { safeRequest, urlProblem, SafeRequestError } = require('../lib/safeRequest');
 
 const router = express.Router();
 router.use(requireAuth, requireAdmin);
@@ -343,7 +344,13 @@ router.put('/sso', async (req, res) => {
   const b = req.body || {};
   const update = {};
   const strFields = ['provider', 'label', 'clientId', 'authorizationUrl', 'tokenUrl', 'userinfoUrl', 'scopes', 'emailField', 'nameField'];
-  for (const k of strFields) if (b[k] !== undefined) update[k] = String(b[k]);
+  for (const k of strFields) if (b[k] !== undefined) update[k] = String(b[k]).trim();
+  // The server calls these URLs: refuse internal targets and plain http up
+  // front (they would be refused at request time anyway).
+  for (const [k, label] of [['authorizationUrl', "URL d'autorisation"], ['tokenUrl', 'URL de jeton'], ['userinfoUrl', 'URL userinfo']]) {
+    const problem = update[k] ? urlProblem(update[k]) : null;
+    if (problem) return res.status(400).json({ error: `${label} : ${problem}` });
+  }
   if (b.enabled !== undefined) update.enabled = !!b.enabled;
   if (b.autoCreateUsers !== undefined) update.autoCreateUsers = !!b.autoCreateUsers;
   if (b.trustUnverifiedEmail !== undefined) update.trustUnverifiedEmail = !!b.trustUnverifiedEmail;
@@ -352,19 +359,15 @@ router.put('/sso', async (req, res) => {
   res.json({ sso: cfg });
 });
 
-// Fetch a URL with a hard timeout; never throws — returns a normalized result.
+// Request a URL through safeRequest (public https targets only, bounded time,
+// redirects reported as-is); never throws — returns a normalized result.
 async function probe(url, init = {}) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 6000);
   try {
-    // redirect: 'manual' so a 3xx is reported as-is (a discovery/auth URL that
-    // redirects is usually a misconfiguration, not a success).
-    const res = await fetch(url, { redirect: 'manual', signal: ctrl.signal, ...init });
+    const res = await safeRequest(url, init);
     return { status: res.status, res };
   } catch (err) {
-    return { error: err.name === 'AbortError' ? 'délai dépassé' : (err.cause?.code || err.message) };
-  } finally {
-    clearTimeout(timer);
+    if (err instanceof SafeRequestError) return { error: err.message };
+    return { error: err.code || 'erreur réseau' };
   }
 }
 

@@ -172,6 +172,10 @@ serveur, restaurez la base, puis `docker compose up -d --build`.
   l'indiquent pas), n'est jamais faite automatiquement pour un compte admin
   (lien depuis le profil, une fois connecté) et les comptes créés via SSO sont
   toujours auditeurs.
+- Anti-SSRF : les URLs SSO appelées par le serveur doivent être en https et
+  pointer vers une adresse publique (vérifiée à la connexion, sans suivre de
+  redirection). Un fournisseur sur réseau privé s'autorise explicitement via
+  `SSO_ALLOWED_HOSTS`.
 - Temps réel : l'accès au projet est vérifié à chaque `join` ; les connexions
   WebSocket d'un utilisateur sont fermées dès que ses sessions sont révoquées
   (déconnexion, changement/réinitialisation de mot de passe, changement de

@@ -7,6 +7,7 @@ const { getSsoConfig } = require('../models/SsoConfig');
 const { requireAuth, resolveSession } = require('../middleware/auth');
 const { sanitizeImage } = require('../lib/image');
 const { disconnectUser } = require('../realtime');
+const { safeRequest } = require('../lib/safeRequest');
 
 const router = express.Router();
 
@@ -347,7 +348,7 @@ async function ssoEmail(cfg, profile, headers) {
   // address only if that one is verified).
   if (cfg.provider === 'github') {
     verified = false;
-    const emRes = await fetch('https://api.github.com/user/emails', { headers });
+    const emRes = await safeRequest('https://api.github.com/user/emails', { headers });
     if (emRes.ok) {
       const list = await emRes.json();
       const ok = Array.isArray(list) ? list.filter((e) => e && e.verified && typeof e.email === 'string') : [];
@@ -392,7 +393,9 @@ router.get('/sso/callback', async (req, res) => {
     linking = !!statePayload.link;
 
     // 1) Exchange the authorization code for an access token.
-    const tokenRes = await fetch(cfg.tokenUrl, {
+    // Admin-configured URLs: fetched through safeRequest (no internal targets,
+    // no redirects).
+    const tokenRes = await safeRequest(cfg.tokenUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       body: new URLSearchParams({
@@ -409,7 +412,7 @@ router.get('/sso/callback', async (req, res) => {
 
     // 2) Fetch the user profile and its stable subject identifier.
     const headers = { Authorization: `Bearer ${accessToken}`, Accept: 'application/json', 'User-Agent': 'recon-sso' };
-    const uiRes = await fetch(cfg.userinfoUrl, { headers });
+    const uiRes = await safeRequest(cfg.userinfoUrl, { headers });
     if (!uiRes.ok) return fail('Échec de récupération du profil SSO');
     const profile = await uiRes.json();
     const sub = profile.sub ?? profile.id ?? profile.oid; // OIDC / GitHub / Entra

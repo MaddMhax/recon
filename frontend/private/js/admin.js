@@ -870,6 +870,7 @@ function keycloakSsoHelpSteps(redirectUri) {
       <code>…/realms/REALM/protocol/openid-connect/userinfo</code><br>
       (vérifiables via <code>…/realms/REALM/.well-known/openid-configuration</code>)`,
     `<strong>Docker</strong> : si l'application tourne en conteneur, n'utilisez pas <code>localhost</code> pour les URLs Token/Userinfo (= le conteneur lui-même). Utilisez une IP/hôte joignable à la fois par le navigateur <em>et</em> par le backend.`,
+    `<strong>Réseau privé / http</strong> : par sécurité (anti-SSRF), le serveur n'appelle que des URLs <strong>https</strong> publiques. Pour un Keycloak sur le réseau local ou en http, ajoutez son hôte à <code>SSO_ALLOWED_HOSTS</code> dans le <code>.env</code> (ex. <code>SSO_ALLOWED_HOSTS=keycloak.lan,192.168.1.20</code>) puis redémarrez l'application.`,
     `Realm → Users → « Add user » : renseignez un <strong>e-mail</strong> (obligatoire), puis définissez un mot de passe (onglet Credentials, « Temporary » désactivé).`,
     `Collez Client ID + secret dans le formulaire, cochez « Activer le SSO », <strong>Enregistrez</strong>. Sans création automatique, l'e-mail doit déjà exister dans « Utilisateurs ».`,
   ];

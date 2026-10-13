@@ -46,6 +46,10 @@ services:
       # otherwise clients can spoof their IP. Set to "1" behind one TLS proxy.
       TRUST_PROXY: ${TRUST_PROXY:-false}
       PORT: 3000
+      # SSO endpoints the server may call on a private network or over plain
+      # http (e.g. a LAN Keycloak): comma-separated host names. Everything else
+      # must be a public https URL (anti-SSRF).
+      SSO_ALLOWED_HOSTS: ${SSO_ALLOWED_HOSTS:-}
       DATABASE_URL: postgres://${POSTGRES_USER:-recon}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-recon}
       # Required, no default: a known secret lets anyone forge admin sessions.
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (openssl rand -hex 32)}
