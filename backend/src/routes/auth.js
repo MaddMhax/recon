@@ -7,7 +7,7 @@ const { getSsoConfig } = require('../models/SsoConfig');
 const { requireAuth, resolveSession } = require('../middleware/auth');
 const { sanitizeImage } = require('../lib/image');
 const { disconnectUser } = require('../realtime');
-const { safeRequest } = require('../lib/safeRequest');
+const { safeRequest, SafeRequestError } = require('../lib/safeRequest');
 const { audit } = require('../lib/audit');
 
 const router = express.Router();
@@ -498,6 +498,11 @@ router.get('/sso/callback', async (req, res) => {
     return res.redirect('/');
   } catch (err) {
     console.error('[sso] callback error:', err);
+    // Anti-SSRF refusal (e.g. a LAN or plain-http provider not allow-listed):
+    // say so, otherwise the admin only sees a generic error.
+    if (err instanceof SafeRequestError) {
+      return fail(`Fournisseur SSO injoignable (${err.message}). Si l'IdP est sur un réseau privé ou en http, ajoutez son hôte à SSO_ALLOWED_HOSTS.`);
+    }
     return fail('Erreur lors de la connexion SSO');
   }
 });

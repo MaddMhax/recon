@@ -125,6 +125,34 @@ Connexion initiale avec le compte admin défini dans `.env`
      **générer un lien de réinitialisation** sécurisé (token à durée limitée,
      24 h) à transmettre à l'utilisateur, qui définit lui-même son mot de passe.
 
+## SSO (OIDC / Keycloak auto-hébergé)
+
+- **Fournisseur sur réseau privé ou en http** : le serveur n'appelle que des
+  URLs SSO en https pointant vers une adresse publique (anti-SSRF). Un Keycloak
+  sur le LAN, un nom de service Docker (`keycloak`) ou un domaine qui résout
+  vers une IP interne est refusé tant que son hôte n'est pas listé dans `.env` :
+
+  ```bash
+  SSO_ALLOWED_HOSTS=keycloak.mondomaine.lan,keycloak:8080,192.168.1.20
+  ```
+
+  Puis `docker compose up -d`. Sans cela, la connexion échoue au retour du
+  fournisseur (« Fournisseur SSO injoignable … ») et l'enregistrement de la
+  configuration SSO est refusé.
+- **Compte administrateur** : il n'est jamais lié automatiquement par e-mail.
+  Connectez-vous une fois avec le mot de passe local, puis *Profil* →
+  *Lier le SSO* ; les connexions suivantes passent par le SSO. À défaut, la
+  liaison peut être écrite en base (ID de l'utilisateur dans Keycloak = `sub`) :
+
+  ```sql
+  UPDATE users
+  SET "ssoSubject" = (SELECT split_part("authorizationUrl", '?', 1) FROM sso_config LIMIT 1)
+                     || '|' || '<ID-utilisateur-Keycloak>'
+  WHERE email = 'admin@exemple.fr';
+  ```
+
+  (`docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`)
+
 ## Portabilité
 
 Tout l'état persistant vit dans le volume Docker `db_data`.
